@@ -1,0 +1,26 @@
+model:
+  model_name_or_path: "Qwen/Qwen3-4B-Base"
+  quantize_int4: true
+  max_new_tokens: 512
+  temperature: 0.8
+
+grpo:
+  group_size: 8
+  clip_epsilon: 0.2
+  kl_coeff: 0.05
+  learning_rate: 1.e-5
+  max_grad_norm: 1.0
+  update_epochs: 2
+  max_steps: 5000
+  log_interval: 5
+  checkpoint_interval: 100
+  seed: 42
+
+env:
+  max_actions: 20
+  use_heuristic_reward: true
+  game_data_path: ""
+
+paths:
+  root_working_dir: "/tmp"
+  model_name: "default"

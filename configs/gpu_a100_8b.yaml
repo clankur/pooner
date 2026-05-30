@@ -1,0 +1,14 @@
+# uv run python -m train --config-name=gpu_a100_8b ++paths.model_name=qwen8b_001
+defaults:
+  - base
+  - _self_
+
+model:
+  model_name_or_path: "Qwen/Qwen3-8B-Base"
+  quantize_int4: true
+
+grpo:
+  learning_rate: 5.e-6
+  max_steps: 5000
+  log_interval: 10
+  checkpoint_interval: 200

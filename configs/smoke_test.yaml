@@ -1,0 +1,23 @@
+# Fast CPU smoke test (~15s): uses tiny GPT2 (600K params) to verify pipeline
+# RUNQ_EXPERIMENT_ID=local uv run python -m train --config-name=smoke_test ++paths.model_name=smoke_000
+defaults:
+  - base
+  - _self_
+
+model:
+  model_name_or_path: "sshleifer/tiny-gpt2"
+  quantize_int4: false
+  max_new_tokens: 32
+  temperature: 1.0
+
+grpo:
+  group_size: 2
+  max_steps: 3
+  log_interval: 1
+  checkpoint_interval: 0
+  seed: 0
+  update_epochs: 1
+
+env:
+  max_actions: 2
+  use_heuristic_reward: true
