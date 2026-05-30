@@ -94,7 +94,11 @@ def load_model(config: ModelConfig, device: torch.device) -> tuple:
     if config.quantize_int4 and device.type == "cuda":
         from torchao.quantization import Int4WeightOnlyConfig, quantize_
 
-        quantize_(model, Int4WeightOnlyConfig())
+        # TILE_PACKED_TO_4D is the tinygemm format — ships with PyTorch, no extra deps.
+        # The default PLAIN format requires mslk (Meta's SM90+ kernel library).
+        from torchao.quantization.quantize_.workflows.int4.int4_packing_format import Int4PackingFormat
+
+        quantize_(model, Int4WeightOnlyConfig(int4_packing_format=Int4PackingFormat.TILE_PACKED_TO_4D))
 
     if device.type != "cuda":
         model = model.to(device)
