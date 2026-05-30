@@ -91,14 +91,13 @@ def load_model(config: ModelConfig, device: torch.device) -> tuple:
         device_map={"": device} if device.type == "cuda" else None,
     )
 
-    if config.quantize_int4 and device.type == "cuda":
-        from torchao.quantization import Int4WeightOnlyConfig, quantize_
+    if config.quantize_int4:
+        # QAT: fake-quantized int4 weights during forward (simulates int4 precision),
+        # but gradients flow through in bf16 so all parameters remain trainable.
+        from torchao.quantization.qat import Int4WeightOnlyQATQuantizer
 
-        # TILE_PACKED_TO_4D is the tinygemm format — ships with PyTorch, no extra deps.
-        # The default PLAIN format requires mslk (Meta's SM90+ kernel library).
-        from torchao.quantization.quantize_.workflows.int4.int4_packing_format import Int4PackingFormat
-
-        quantize_(model, Int4WeightOnlyConfig(int4_packing_format=Int4PackingFormat.TILE_PACKED_TO_4D))
+        qat = Int4WeightOnlyQATQuantizer(groupsize=128)
+        model = qat.prepare(model)
 
     if device.type != "cuda":
         model = model.to(device)
@@ -108,7 +107,7 @@ def load_model(config: ModelConfig, device: torch.device) -> tuple:
 
 
 def load_ref_model(config: ModelConfig) -> AutoModelForCausalLM:
-    """Load a frozen reference model on CPU for KL computation."""
+    """Load a frozen reference model on CPU. Swapped to GPU briefly each step for fast logprob computation."""
     ref_model = AutoModelForCausalLM.from_pretrained(
         config.model_name_or_path,
         dtype=torch.bfloat16,
@@ -117,6 +116,21 @@ def load_ref_model(config: ModelConfig) -> AutoModelForCausalLM:
     for p in ref_model.parameters():
         p.requires_grad = False
     return ref_model
+
+
+def compute_ref_logprobs(
+    ref_model: AutoModelForCausalLM,
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    device: torch.device,
+) -> torch.Tensor:
+    """Swap ref model to GPU, compute logprobs, swap back. Returns cached tensor on device."""
+    ref_model.to(device)
+    with torch.no_grad():
+        ref_lp = get_per_token_logprobs(ref_model, input_ids, attention_mask)
+    ref_model.to("cpu")
+    torch.cuda.empty_cache()
+    return ref_lp  # stays on device
 
 
 # ─── Log-prob computation ──────────────────────────────────────────────────
@@ -186,18 +200,18 @@ def collate_trajectories(
     # old_log_probs is overwritten in the training loop (step 3) before use
     old_lp = torch.zeros(K, max_len - 1)
 
-    # Ref log-probs
-    ref_lp = torch.zeros(K, max_len - 1)
+    # Ref log-probs: swap ref model to GPU, compute, swap back
     if ref_model is not None:
-        with torch.no_grad():
-            ref_lp = get_per_token_logprobs(ref_model, full_ids, attention_mask)
+        ref_lp = compute_ref_logprobs(ref_model, full_ids.to(device), attention_mask.to(device), device)
+    else:
+        ref_lp = torch.zeros(K, max_len - 1, device=device)
 
     return GroupData(
         full_ids=full_ids.to(device),
         attention_mask=attention_mask.to(device),
         generation_mask=generation_mask[:, 1:].to(device),  # align with log-prob positions
         old_log_probs=old_lp.to(device),
-        ref_log_probs=ref_lp.to(device),
+        ref_log_probs=ref_lp,
         advantages=advantages.to(device),
         rewards=[t.total_reward for t in trajectories],
     )

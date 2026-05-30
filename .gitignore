@@ -5,3 +5,8 @@ outputs/
 *.pt
 .ruff_cache/
 wandb/
+
+# Bridge dependencies (cloned at setup time)
+bridge/rs-sdk/
+bridge/node_modules/
+bridge/bun.lock
