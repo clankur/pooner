@@ -92,9 +92,9 @@ def load_model(config: ModelConfig, device: torch.device) -> tuple:
     )
 
     if config.quantize_int4 and device.type == "cuda":
-        from torchao.quantization import int4_weight_only, quantize_
+        from torchao.quantization import Int4WeightOnlyConfig, quantize_
 
-        quantize_(model, int4_weight_only())
+        quantize_(model, Int4WeightOnlyConfig())
 
     if device.type != "cuda":
         model = model.to(device)
