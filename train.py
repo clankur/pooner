@@ -5,10 +5,13 @@ Usage:
 """
 
 import json
+import logging
 import os
 import time
 import urllib.request
 from dataclasses import asdict, dataclass
+
+logging.basicConfig(level=logging.INFO, format="%(name)s: %(message)s")
 
 import hydra
 import runq
@@ -19,7 +22,7 @@ from einops import rearrange
 from omegaconf import DictConfig, OmegaConf
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from rs_env import Trajectory, load_prompt_bank, rollout_trajectory
+from rs_env import GameBridge, Trajectory, load_prompt_bank, rollout_trajectory
 
 # ─── Config dataclasses ─────────────────────────────────────────────────────
 
@@ -51,6 +54,9 @@ class EnvConfig:
     max_actions: int = 20
     use_heuristic_reward: bool = True
     game_data_path: str = ""
+    gateway_url: str = "ws://localhost:7780"
+    bot_username: str = "grpo_agent"
+    bot_password: str = ""
 
 
 @dataclass(frozen=True)
@@ -150,12 +156,18 @@ def get_per_token_logprobs(
     Returns:
         (B, L-1) log-probs for tokens at positions 1..L-1
     """
-    outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-    logits = outputs.logits[:, :-1, :]  # (B, L-1, V)
-    targets = input_ids[:, 1:]  # (B, L-1)
-    log_probs = F.log_softmax(logits, dim=-1)
-    per_token_lp = rearrange(log_probs.gather(dim=-1, index=rearrange(targets, "b l -> b l 1")), "b l 1 -> b l")
-    return per_token_lp  # (B, L-1)
+    # Process one sample at a time to avoid materializing (B, L, V) softmax
+    all_lp = []
+    for b in range(input_ids.shape[0]):
+        ids_b = rearrange(input_ids[b], "l -> 1 l")
+        mask_b = rearrange(attention_mask[b], "l -> 1 l")
+        logits_b = model(input_ids=ids_b, attention_mask=mask_b).logits[0, :-1, :]  # (L-1, V)
+        targets_b = input_ids[b, 1:]  # (L-1,)
+        # log_prob = logit[target] - logsumexp(logits) — avoids full softmax allocation
+        target_logits = logits_b.gather(dim=-1, index=rearrange(targets_b, "l -> l 1")).squeeze(-1)  # (L-1,)
+        lse = torch.logsumexp(logits_b, dim=-1)  # (L-1,)
+        all_lp.append(target_logits - lse)
+    return torch.stack(all_lp)  # (B, L-1)
 
 
 # ─── GRPO loss ─────────────────────────────────────────────────────────────
@@ -301,13 +313,32 @@ def train(config: Config) -> None:
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Trainable parameters: {trainable_params:,}")
 
-    print("Loading reference model on CPU...")
-    ref_model = load_ref_model(config.model)
+    if config.grpo.kl_coeff > 0:
+        print("Loading reference model on CPU...")
+        ref_model = load_ref_model(config.model)
+    else:
+        print("KL disabled (kl_coeff=0), skipping reference model")
+        ref_model = None
 
     optimizer = torch.optim.AdamW(
         [p for p in model.parameters() if p.requires_grad],
         lr=config.grpo.learning_rate,
     )
+
+    # Game bridge: live server or heuristic simulator
+    bridge: GameBridge | None = None
+    if not config.env.use_heuristic_reward:
+        print(f"Starting game bridge: {config.env.gateway_url} as {config.env.bot_username}")
+        bridge = GameBridge(
+            gateway_url=config.env.gateway_url,
+            bot_username=config.env.bot_username,
+            bot_password=config.env.bot_password,
+        )
+        initial_state = bridge.start()
+        if initial_state:
+            print(f"Bridge connected. Position: {initial_state.position}, HP: {initial_state.hp}/{initial_state.max_hp}")
+        else:
+            print("WARNING: Bridge started but no initial state received")
 
     prompt_bank = load_prompt_bank(seed=config.grpo.seed)
     model_dir = os.path.join(config.paths.root_working_dir, config.paths.model_name)
@@ -337,6 +368,7 @@ def train(config: Config) -> None:
                 max_new_tokens=config.model.max_new_tokens,
                 temperature=config.model.temperature,
                 device=device,
+                bridge=bridge,
             )
             trajectories.append(traj)
 
@@ -356,26 +388,41 @@ def train(config: Config) -> None:
         epoch_kl: list[float] = []
 
         for _epoch in range(config.grpo.update_epochs):
-            new_lp = get_per_token_logprobs(model, group.full_ids, group.attention_mask)
-
-            total, p_loss, kl = grpo_loss(
-                new_log_probs=new_lp,
-                old_log_probs=group.old_log_probs,
-                ref_log_probs=group.ref_log_probs,
-                advantages=group.advantages,
-                generation_mask=group.generation_mask,
-                clip_epsilon=config.grpo.clip_epsilon,
-                kl_coeff=config.grpo.kl_coeff,
-            )
-
+            # Accumulate gradients one sample at a time to fit in VRAM
             optimizer.zero_grad()
-            total.backward()
+            total_accum = 0.0
+            policy_accum = 0.0
+            kl_accum = 0.0
+            K = group.full_ids.shape[0]
+
+            for b in range(K):
+                ids_b = rearrange(group.full_ids[b], "l -> 1 l")
+                mask_b = rearrange(group.attention_mask[b], "l -> 1 l")
+                logits_b = model(input_ids=ids_b, attention_mask=mask_b).logits[0, :-1, :]
+                targets_b = group.full_ids[b, 1:]
+                target_logits = logits_b.gather(dim=-1, index=rearrange(targets_b, "l -> l 1")).squeeze(-1)
+                new_lp_b = target_logits - torch.logsumexp(logits_b, dim=-1)
+
+                total_b, p_b, kl_b = grpo_loss(
+                    new_log_probs=rearrange(new_lp_b, "l -> 1 l"),
+                    old_log_probs=rearrange(group.old_log_probs[b], "l -> 1 l"),
+                    ref_log_probs=rearrange(group.ref_log_probs[b], "l -> 1 l"),
+                    advantages=rearrange(group.advantages[b], " -> 1"),
+                    generation_mask=rearrange(group.generation_mask[b], "l -> 1 l"),
+                    clip_epsilon=config.grpo.clip_epsilon,
+                    kl_coeff=config.grpo.kl_coeff,
+                )
+                (total_b / K).backward()
+                total_accum += total_b.item() / K
+                policy_accum += p_b.item() / K
+                kl_accum += kl_b.item() / K
+
             torch.nn.utils.clip_grad_norm_(model.parameters(), config.grpo.max_grad_norm)
             optimizer.step()
 
-            epoch_losses.append(total.item())
-            epoch_policy.append(p_loss.item())
-            epoch_kl.append(kl.item())
+            epoch_losses.append(total_accum)
+            epoch_policy.append(policy_accum)
+            epoch_kl.append(kl_accum)
 
         # ── 5. Log metrics ──
         rewards = torch.tensor(group.rewards)
@@ -434,6 +481,10 @@ def train(config: Config) -> None:
     with open(metrics_path, "w") as f:
         for m in metrics_log:
             f.write(json.dumps(asdict(m)) + "\n")
+
+    if bridge is not None:
+        bridge.stop()
+        print("Game bridge stopped")
 
     wandb.finish()
     print(f"Training complete. Final mean reward: {metrics_log[-1].group_mean_reward:.2f}")

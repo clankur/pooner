@@ -811,20 +811,28 @@ def rollout_trajectory(
             tools=TOOL_SCHEMAS,
             tokenize=False,
             add_generation_prompt=True,
-            enable_thinking=True,
+            enable_thinking=False,
         )
     else:
         prompt_text = f"{load_system_prompt()}\n\n{format_state(state)}\n\n"
 
-    prompt_ids = tokenizer.encode(prompt_text, return_tensors="pt")[0]
+    # add_special_tokens=False: apply_chat_template already includes BOS/special tokens
+    prompt_ids = tokenizer.encode(prompt_text, return_tensors="pt", add_special_tokens=False)[0]
     prompt_len = len(prompt_ids)
 
     all_token_ids: list[int] = prompt_ids.tolist()
     gen_mask: list[int] = [0] * prompt_len
     model_log_probs: list[float] = []
 
+    # Build stop token list: eos + <|im_end|> for chat models
+    stop_ids = [tokenizer.eos_token_id]
+    im_end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
+    if isinstance(im_end_id, int) and im_end_id != tokenizer.unk_token_id:
+        stop_ids.append(im_end_id)
+
     num_actions = 0
     num_valid = 0
+    _logged_first = False
 
     model.eval()
     for _action_idx in range(max_actions):
@@ -837,13 +845,17 @@ def rollout_trajectory(
                 temperature=temperature,
                 do_sample=True,
                 pad_token_id=tokenizer.pad_token_id,
-                eos_token_id=tokenizer.eos_token_id,
+                eos_token_id=stop_ids,
                 return_dict_in_generate=True,
                 output_scores=True,
             )
 
         new_ids = outputs.sequences[0, len(all_token_ids) :]
         new_text = tokenizer.decode(new_ids, skip_special_tokens=False)
+
+        if not _logged_first:
+            logger.info("First generation (%d tokens): %s", len(new_ids), repr(new_text[:1000]))
+            _logged_first = True
 
         for i, score in enumerate(outputs.scores):
             log_probs = torch.log_softmax(score[0], dim=-1)

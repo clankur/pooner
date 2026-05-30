@@ -6,6 +6,7 @@ Single source of truth for tool schemas. Used for:
   - Type-safe action dispatch in the simulator and bridge
 """
 
+import logging
 from enum import Enum
 
 from pydantic import BaseModel, Field
@@ -219,31 +220,37 @@ class ToolCall(BaseModel):
     arguments: dict
 
 
-def parse_tool_call(text: str) -> tuple[str, BaseModel] | None:
-    """Parse a <tool_call> from model output, returning (name, validated_args).
+logger = logging.getLogger(__name__)
 
-    Returns None if no valid tool call is found.
-    """
-    start = text.find("<tool_call>")
+_TAG_OPEN = "<tool_call>"
+_TAG_CLOSE = "</tool_call>"
+
+
+def parse_tool_call(text: str) -> tuple[str, BaseModel] | None:
+    """Parse a JSON tool call from model output: <tool_call>{"name": "...", "arguments": {...}}</tool_call>"""
+    start = text.find(_TAG_OPEN)
     if start == -1:
         return None
-    end = text.find("</tool_call>", start)
+    end = text.find(_TAG_CLOSE, start)
     if end == -1:
         return None
 
-    raw = text[start + len("<tool_call>") : end].strip()
+    raw = text[start + len(_TAG_OPEN) : end].strip()
     try:
         call = ToolCall.model_validate_json(raw)
-    except Exception:
+    except Exception as e:
+        logger.info("Tool call parse failed: %s | raw: %s", e, raw[:200])
         return None
 
     model_cls = TOOL_MODELS.get(call.name)
     if model_cls is None:
+        logger.info("Unknown tool name: %s", call.name)
         return None
 
     try:
         validated_args = model_cls.model_validate(call.arguments)
-    except Exception:
+    except Exception as e:
+        logger.info("Tool args validation failed for %s: %s", call.name, e)
         return None
 
     return call.name, validated_args

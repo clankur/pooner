@@ -20,6 +20,9 @@ env:
   max_actions: 20
   use_heuristic_reward: true
   game_data_path: ""
+  gateway_url: "ws://localhost:7780"
+  bot_username: "grpo_agent"
+  bot_password: ""
 
 paths:
   root_working_dir: "/tmp"
