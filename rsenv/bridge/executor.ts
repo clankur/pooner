@@ -611,8 +611,15 @@ async function main(): Promise<void> {
   // On headless systems, launch bot client via puppeteer
   if (isHeadless) {
     log("Headless mode: launching bot client via puppeteer...");
-    const { launchBotBrowser } = await import("./rs-sdk/sdk/test/utils/browser");
-    await launchBotBrowser(username, { headless: true, useSharedBrowser: false });
+    const puppeteer = await import("puppeteer");
+    const browser = await puppeteer.default.launch({
+      headless: true,
+      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-gpu", "--disable-dev-shm-usage"],
+    });
+    const page = await browser.newPage();
+    const botUrl = `http://localhost:8888/bot?bot=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`;
+    log(`Opening: ${botUrl}`);
+    await page.goto(botUrl, { waitUntil: "networkidle2", timeout: 60000 });
     log("Puppeteer bot client launched");
   }
 
