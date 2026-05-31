@@ -13,7 +13,7 @@ import sys
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from rs_env import (
+from rsenv import (
     Trajectory,
     format_state,
     load_prompt_bank,

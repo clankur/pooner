@@ -6,7 +6,7 @@ defaults:
   - _self_
 
 model:
-  model_name_or_path: "Qwen/Qwen3-4B"
+  model_name_or_path: "Qwen/Qwen3.5-4B"
   quantize_int4: false
   max_new_tokens: 256
 
@@ -21,6 +21,3 @@ grpo:
 env:
   max_actions: 5
   use_heuristic_reward: false
-  gateway_url: "ws://localhost:7780"
-  bot_username: "grpobot1"
-  bot_password: "iwPkYAJL4wAr"

@@ -11,18 +11,17 @@ import time
 import urllib.request
 from dataclasses import asdict, dataclass
 
-logging.basicConfig(level=logging.INFO, format="%(name)s: %(message)s")
-
 import hydra
 import runq
 import torch
-import torch.nn.functional as F
 import wandb
 from einops import rearrange
 from omegaconf import DictConfig, OmegaConf
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from rs_env import GameBridge, Trajectory, load_prompt_bank, rollout_trajectory
+from rsenv import BridgeClient, SimClient, Trajectory, load_prompt_bank, rollout_trajectory
+
+logging.basicConfig(level=logging.INFO, format="%(name)s: %(message)s")
 
 # ─── Config dataclasses ─────────────────────────────────────────────────────
 
@@ -325,20 +324,17 @@ def train(config: Config) -> None:
         lr=config.grpo.learning_rate,
     )
 
-    # Game bridge: live server or heuristic simulator
-    bridge: GameBridge | None = None
+    # Game client: live server or heuristic simulator
+    client: SimClient | BridgeClient | None = None
     if not config.env.use_heuristic_reward:
-        print(f"Starting game bridge: {config.env.gateway_url} as {config.env.bot_username}")
-        bridge = GameBridge(
+        print(f"Starting bridge client: {config.env.gateway_url} as {config.env.bot_username}")
+        client = BridgeClient(
             gateway_url=config.env.gateway_url,
             bot_username=config.env.bot_username,
             bot_password=config.env.bot_password,
         )
-        initial_state = bridge.start()
-        if initial_state:
-            print(f"Bridge connected. Position: {initial_state.position}, HP: {initial_state.hp}/{initial_state.max_hp}")
-        else:
-            print("WARNING: Bridge started but no initial state received")
+        initial_state = client.start()
+        print(f"Bridge connected. Position: {initial_state.position}, HP: {initial_state.hp}/{initial_state.max_hp}")
 
     prompt_bank = load_prompt_bank(seed=config.grpo.seed)
     model_dir = os.path.join(config.paths.root_working_dir, config.paths.model_name)
@@ -368,9 +364,12 @@ def train(config: Config) -> None:
                 max_new_tokens=config.model.max_new_tokens,
                 temperature=config.model.temperature,
                 device=device,
-                bridge=bridge,
+                client=client,
             )
             trajectories.append(traj)
+
+        # Free generation KV cache before training
+        torch.cuda.empty_cache() if device.type == "cuda" else None
 
         # ── 2. Collate + compute advantages ──
         group = collate_trajectories(trajectories, ref_model, device)
@@ -482,9 +481,9 @@ def train(config: Config) -> None:
         for m in metrics_log:
             f.write(json.dumps(asdict(m)) + "\n")
 
-    if bridge is not None:
-        bridge.stop()
-        print("Game bridge stopped")
+    if isinstance(client, BridgeClient):
+        client.stop()
+        print("Bridge client stopped")
 
     wandb.finish()
     print(f"Training complete. Final mean reward: {metrics_log[-1].group_mean_reward:.2f}")

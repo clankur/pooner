@@ -2,6 +2,15 @@
 // Reads JSON commands from stdin, executes via BotActions, writes JSON results to stdout.
 // All stderr output is for logging only; stdout is the protocol channel.
 
+// Redirect console.log/warn/info to stderr so rs-sdk internal logging
+// doesn't corrupt the JSON protocol on stdout.
+const _origLog = console.log;
+const _origWarn = console.warn;
+const _origInfo = console.info;
+console.log = (...args: unknown[]) => process.stderr.write(args.map(String).join(" ") + "\n");
+console.warn = (...args: unknown[]) => process.stderr.write("[warn] " + args.map(String).join(" ") + "\n");
+console.info = (...args: unknown[]) => process.stderr.write("[info] " + args.map(String).join(" ") + "\n");
+
 import { BotSDK, deriveGatewayUrl } from "./rs-sdk/sdk/index";
 import { BotActions } from "./rs-sdk/sdk/actions";
 import type {
@@ -555,9 +564,22 @@ async function executeAction(
 // ─── Main loop ───────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
+  // Load credentials from bot.env if available
+  const username = process.env.RS_BOT_USERNAME ?? "grpobot1";
+  const botEnvPath = `${import.meta.dir}/rs-sdk/bots/${username}/bot.env`;
+  let password = process.env.RS_BOT_PASSWORD ?? "";
+  try {
+    const envFile = await Bun.file(botEnvPath).text();
+    for (const line of envFile.split("\n")) {
+      const [key, ...vals] = line.split("=");
+      if (key.trim() === "PASSWORD") password = vals.join("=").trim();
+    }
+    log(`Loaded credentials from ${botEnvPath}`);
+  } catch {
+    log(`No bot.env found at ${botEnvPath}, using env vars`);
+  }
+
   const gatewayUrl = deriveGatewayUrl(process.env.RS_GATEWAY ?? "");
-  const username = process.env.RS_BOT_USERNAME ?? "grpo_agent";
-  const password = process.env.RS_BOT_PASSWORD ?? "";
 
   log(`Connecting to gateway: ${gatewayUrl}`);
   log(`Bot username: ${username}`);
@@ -566,7 +588,7 @@ async function main(): Promise<void> {
     botUsername: username,
     password,
     gatewayUrl,
-    autoLaunchBrowser: false,
+    autoLaunchBrowser: true,
     autoReconnect: true,
     showChat: false,
   });
@@ -582,12 +604,31 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  // Wait for the bot client to be in-game (browser needs time to load)
+  log("Waiting for bot to enter game world...");
+  const maxWaitMs = 60_000;
+  const pollMs = 1_000;
+  const startTime = Date.now();
+  while (Date.now() - startTime < maxWaitMs) {
+    const s = sdk.getState();
+    if (s?.inGame && s.player) {
+      log(`Bot is in-game at (${s.player.x}, ${s.player.z})`);
+      break;
+    }
+    await new Promise((r) => setTimeout(r, pollMs));
+  }
+
+  // Skip tutorial if on Tutorial Island
+  log("Skipping tutorial if needed...");
+  await bot.skipTutorial();
+  log("Tutorial check complete");
+
   // Signal readiness by sending initial state
   const initialState = sdk.getState();
-  if (initialState) {
+  if (initialState?.inGame) {
     send(formatState(initialState));
   } else {
-    send({ type: "error", message: "No game state available after connect" });
+    send({ type: "error", message: "Bot not in game after 60s wait" });
   }
 
   // Read stdin line by line

@@ -1,5 +1,5 @@
 model:
-  model_name_or_path: "Qwen/Qwen3-4B"
+  model_name_or_path: "Qwen/Qwen3.5-4B"
   quantize_int4: true
   max_new_tokens: 512
   temperature: 0.8
@@ -21,7 +21,7 @@ env:
   use_heuristic_reward: true
   game_data_path: ""
   gateway_url: "ws://localhost:7780"
-  bot_username: "grpo_agent"
+  bot_username: "grpobot1"
   bot_password: ""
 
 paths:

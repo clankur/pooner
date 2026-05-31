@@ -182,6 +182,31 @@ TOOL_MODELS: dict[str, type[BaseModel]] = {
 
 TOOL_NAMES: set[str] = set(TOOL_MODELS.keys())
 
+XP_TABLE: dict[str, dict[str, float]] = {
+    "chopTree": {"Woodcutting": 25.0},
+    "chopOak": {"Woodcutting": 37.5},
+    "mineRock": {"Mining": 17.5},
+    "mineIron": {"Mining": 35.0},
+    "attackNpc": {"Attack": 20.0, "Hitpoints": 13.3},
+    "castSpell": {"Magic": 11.5},
+    "cookItem": {"Cooking": 30.0},
+    "catchFish": {"Fishing": 20.0},
+    "craftItem": {"Crafting": 22.5},
+    "buryBones": {"Prayer": 4.5},
+    "pickpocket": {"Thieving": 8.0},
+    "fletchLogs": {"Fletching": 5.0},
+    "smithItem": {"Smithing": 12.5},
+}
+
+LEVEL_REQUIREMENTS: dict[str, int] = {
+    "chopOak": 15,
+    "mineIron": 15,
+    "catchFish": 5,
+    "pickpocket": 5,
+    "castSpell": 3,
+    "cookItem": 1,
+}
+
 
 # ─── Schema generation ────────────────────────────────────────────────────
 

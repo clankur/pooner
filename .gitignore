@@ -7,6 +7,7 @@ outputs/
 wandb/
 
 # Bridge dependencies (cloned at setup time)
-bridge/rs-sdk/
-bridge/node_modules/
-bridge/bun.lock
+rsenv/bridge/rs-sdk/
+rsenv/bridge/node_modules/
+rsenv/bridge/bun.lock
+rsenv/bridge/logs/
