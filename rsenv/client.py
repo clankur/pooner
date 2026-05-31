@@ -271,9 +271,7 @@ class BridgeClient(RSClient):
         )
 
     def reset(self, initial_state: GameState | None = None) -> GameState:
-        # Don't disconnect/reconnect — just refresh state. The bot stays in-game.
-        return self.get_state()
-        return self._state
+        return self.get_state(include_screenshot=True)
 
     @property
     def is_running(self) -> bool:
