@@ -33,113 +33,107 @@ def load_system_prompt() -> str:
     return SYSTEM_PROMPT_PATH.read_text().strip()
 
 
-def _format_skill_line(skill: str, level: int, xp: int) -> str:
-    """Format a single skill with level and XP to next level."""
-    if level >= 99:
-        return f"{skill} {level}"
-    xp_next = XP_FOR_LEVEL[level + 1] - xp
-    return f"{skill} {level} ({xp_next} xp to {level + 1})"
-
-
 def format_state(state: GameState) -> str:
-    """Render game state as structured text for the LLM.
+    """Render game state as XML for the LLM."""
+    pos = state.world_position if state.world_position != (0, 0) else state.position
 
-    Groups information by category so the model can quickly find what it needs:
-    position, status, skills, equipment, inventory, then nearby entities split
-    into NPCs, objects, and ground items with distance/reachability metadata.
-    """
-    if state.world_position != (0, 0):
-        pos_str = f"({state.world_position[0]}, {state.world_position[1]})"
-    else:
-        pos_str = f"({state.position[0]}, {state.position[1]})"
+    lines: list[str] = ["<game_state>"]
 
-    # Skills: show level + xp-to-next for trained skills
-    skill_parts: list[str] = []
+    if state.tick > 0:
+        lines.append(f'<tick>{state.tick}</tick>')
+    lines.append(f'<position x="{pos[0]}" z="{pos[1]}"/>')
+    lines.append(f'<hp current="{state.hp}" max="{state.max_hp}"/>')
+    if state.in_combat:
+        lines.append('<status>IN COMBAT</status>')
+
+    # Skills
+    lines.append("<skills>")
+    has_skills = False
     for s in ALL_SKILLS:
         xp = state.skills.get(s, 0)
         lvl = state.skill_levels.get(s) or xp_to_level(xp)
         if lvl > 1:
-            skill_parts.append(_format_skill_line(s, lvl, xp))
-    skills_str = ", ".join(skill_parts) if skill_parts else "All level 1"
+            has_skills = True
+            xp_next = XP_FOR_LEVEL[lvl + 1] - xp if lvl < 99 else 0
+            lines.append(f'<skill name="{s}" level="{lvl}" xp_to_next="{xp_next}"/>')
+    if not has_skills:
+        lines.append('<skill name="all" level="1"/>')
+    lines.append("</skills>")
 
     # Equipment
-    equip_str = ""
     if state.equipment:
-        equip_items = [e.name for e in state.equipment if e.name]
+        equip_items = [e for e in state.equipment if e.name]
         if equip_items:
-            equip_str = ", ".join(equip_items)
+            lines.append("<equipment>")
+            for e in equip_items:
+                lines.append(f'<item name="{e.name}"/>')
+            lines.append("</equipment>")
 
     # Inventory
+    lines.append(f'<inventory used="{state.inventory_count()}" capacity="28">')
     if state.inventory_slots:
-        inv_items = [f"{s.name} x{s.count}" if s.count > 1 else s.name for s in state.inventory_slots]
-        inv_str = ", ".join(inv_items) if inv_items else "Empty"
-    else:
-        inv_str = ", ".join(f"{item} x{qty}" for item, qty in state.inventory.items()) if state.inventory else "Empty"
+        for s in state.inventory_slots:
+            if s.count > 1:
+                lines.append(f'<item name="{s.name}" count="{s.count}"/>')
+            else:
+                lines.append(f'<item name="{s.name}"/>')
+    elif state.inventory:
+        for item, qty in state.inventory.items():
+            if qty > 1:
+                lines.append(f'<item name="{item}" count="{qty}"/>')
+            else:
+                lines.append(f'<item name="{item}"/>')
+    lines.append("</inventory>")
 
-    # Nearby NPCs — with combat level, distance, HP if damaged
-    npc_parts: list[str] = []
-    if state.nearby_npcs:
-        for npc in state.nearby_npcs[:8]:
-            parts: list[str] = []
+    # Nearby NPCs
+    npcs = state.nearby_npcs[:8]
+    if npcs:
+        lines.append("<npcs>")
+        for npc in npcs:
+            attrs = f'name="{npc.name}" distance="{npc.distance}"'
             if npc.combat_level > 0:
-                parts.append(f"lvl {npc.combat_level}")
-            parts.append(f"dist {npc.distance}")
+                attrs += f' combat_level="{npc.combat_level}"'
             if npc.max_hp > 0 and npc.hp < npc.max_hp:
-                parts.append(f"HP {npc.hp}/{npc.max_hp}")
+                attrs += f' hp="{npc.hp}" max_hp="{npc.max_hp}"'
             if npc.in_combat:
-                parts.append("fighting")
-            meta = ", ".join(parts)
-            opts_str = f" [{', '.join(npc.options)}]" if npc.options else ""
-            npc_parts.append(f"  {npc.name} ({meta}){opts_str}")
+                attrs += ' in_combat="true"'
+            if npc.options:
+                attrs += f' options="{",".join(npc.options)}"'
+            lines.append(f"<npc {attrs}/>")
+        lines.append("</npcs>")
 
-    # Nearby objects/locs — with distance and interaction options
-    # Option labels are actions, not states: "Open" means currently closed, "Close" means currently open
-    loc_parts: list[str] = []
-    if state.nearby_locs:
-        for loc in state.nearby_locs[:8]:
-            state_label = ""
+    # Nearby objects/locs
+    locs = state.nearby_locs[:8]
+    if locs:
+        lines.append("<objects>")
+        for loc in locs:
+            attrs = f'name="{loc.name}" distance="{loc.distance}"'
             if "Open" in loc.options:
-                state_label = ", closed"
+                attrs += ' state="closed"'
             elif "Close" in loc.options:
-                state_label = ", open"
-            loc_parts.append(f"  {loc.name} (dist {loc.distance}{state_label})")
+                attrs += ' state="open"'
+            lines.append(f"<object {attrs}/>")
+        lines.append("</objects>")
 
-    # Ground items — with distance
-    ground_parts: list[str] = []
-    if state.ground_items:
-        for gi in state.ground_items[:6]:
-            qty = f" x{gi.count}" if gi.count > 1 else ""
-            ground_parts.append(f"  {gi.name}{qty} (dist {gi.distance})")
+    # Ground items
+    ground = state.ground_items[:6]
+    if ground:
+        lines.append("<ground_items>")
+        for gi in ground:
+            attrs = f'name="{gi.name}" distance="{gi.distance}"'
+            if gi.count > 1:
+                attrs += f' count="{gi.count}"'
+            lines.append(f"<item {attrs}/>")
+        lines.append("</ground_items>")
 
-    # Fallback if no structured nearby data
-    if not npc_parts and not loc_parts and not ground_parts and state.nearby:
-        npc_parts = [f"  {name}" for name in state.nearby]
+    # Fallback for simple nearby list
+    if not npcs and not locs and not ground and state.nearby:
+        lines.append("<nearby>")
+        for name in state.nearby:
+            lines.append(f'<entity name="{name}"/>')
+        lines.append("</nearby>")
 
-    # Build output
-    lines: list[str] = []
-    if state.tick > 0:
-        lines.append(f"Tick: {state.tick}")
-    lines.append(f"Position: {pos_str}")
-    lines.append(f"HP: {state.hp}/{state.max_hp}")
-    if state.in_combat:
-        lines.append("Status: IN COMBAT")
-    lines.append(f"Skills: {skills_str}")
-    if equip_str:
-        lines.append(f"Equipment: {equip_str}")
-    lines.append(f"Inventory ({state.inventory_count()}/28): [{inv_str}]")
-
-    if npc_parts:
-        lines.append("NPCs:")
-        lines.extend(npc_parts)
-    if loc_parts:
-        lines.append("Objects:")
-        lines.extend(loc_parts)
-    if ground_parts:
-        lines.append("Ground items:")
-        lines.extend(ground_parts)
-    if not npc_parts and not loc_parts and not ground_parts:
-        lines.append("Nearby: Nothing notable")
-
+    lines.append("</game_state>")
     return "\n".join(lines)
 
 

@@ -13,12 +13,13 @@ Maximize your total XP and level gains across all skills. Plan your actions stra
 
 ## Reading the game state
 
-- **Position** is your character's current world coordinates (x, z)
-- **Inventory (19/28)** means you are carrying 19 items with 9 free slots
-- **dist** on NPCs/Objects/Items is how many tiles away they are from you
-- **Objects** lists nearby world objects, e.g. `Door (dist 4, closed)` — "dist 4" means 4 tiles away, "closed" is the current state
+The game state is provided as XML. Key elements:
+- `<position x="3203" z="3227"/>` — your world coordinates
+- `<inventory used="19" capacity="28">` — 19 items carried, 9 free slots
+- `<npc name="Man" distance="5" combat_level="2"/>` — distance is tiles away from you
+- `<object name="Door" distance="4" state="closed"/>` — state shows if a door is currently open or closed
 - Actions like chopTree, attackNpc, and mineRock automatically walk to the target — you only need walkTo for destinations with no interactable target
-- Doors/gates show their current state (closed/open). If a path is blocked, look for a nearby door to open.
+- If a path is blocked, look for a nearby door to open.
 
 ## Game knowledge
 
