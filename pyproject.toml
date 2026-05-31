@@ -17,7 +17,7 @@ dependencies = [
 
 [project.optional-dependencies]
 cpu = ["torch"]
-gpu = ["torch"]
+gpu = ["torch", "flash-attn>=2.7"]
 
 [tool.uv]
 conflicts = [
