@@ -223,10 +223,8 @@ class BridgeClient(RSClient):
         )
 
     def reset(self, initial_state: GameState | None = None) -> GameState:
-        self._send_command({"type": "reset"})
-        response = self._read_response()
-        if response and response.get("type") == "state":
-            self._state = self._parse_state(response)
+        # Don't disconnect/reconnect — just refresh state. The bot stays in-game.
+        return self.get_state()
         return self._state
 
     @property
