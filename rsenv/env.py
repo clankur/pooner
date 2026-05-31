@@ -14,8 +14,8 @@ from pydantic import BaseModel
 from transformers import PreTrainedModel, PreTrainedTokenizerBase
 
 from rsenv.client import RSClient
-from rsenv.state import ALL_SKILLS, GameState, Trajectory, xp_to_level
-from rsenv.tools import TOOL_SCHEMAS, parse_tool_call
+from rsenv.state import ALL_SKILLS, XP_FOR_LEVEL, GameState, Trajectory, xp_to_level
+from rsenv.tools import ACTION_PREREQUISITES, TOOL_SCHEMAS, parse_tool_call
 
 logger = logging.getLogger(__name__)
 
@@ -28,61 +28,129 @@ def load_system_prompt() -> str:
     return SYSTEM_PROMPT_PATH.read_text().strip()
 
 
+def _format_skill_line(skill: str, level: int, xp: int) -> str:
+    """Format a single skill with level and XP to next level."""
+    if level >= 99:
+        return f"{skill} {level}"
+    xp_next = XP_FOR_LEVEL[level + 1] - xp
+    return f"{skill} {level} ({xp_next} xp to {level + 1})"
+
+
 def format_state(state: GameState) -> str:
-    """Render game state as markdown for the LLM."""
+    """Render game state as structured text for the LLM.
+
+    Groups information by category so the model can quickly find what it needs:
+    position, status, skills, equipment, inventory, then nearby entities split
+    into NPCs, objects, and ground items with distance/reachability metadata.
+    """
     if state.world_position != (0, 0):
         pos_str = f"({state.world_position[0]}, {state.world_position[1]})"
     else:
         pos_str = f"({state.position[0]}, {state.position[1]})"
 
+    # Skills: show level + xp-to-next for trained skills
+    skill_parts: list[str] = []
     if state.skill_levels:
-        skills_str = ", ".join(
-            f"{s} {state.skill_levels[s]}" for s in ALL_SKILLS if s in state.skill_levels and state.skill_levels[s] > 1
-        )
+        for s in ALL_SKILLS:
+            lvl = state.skill_levels.get(s, 1)
+            if lvl > 1:
+                xp = state.skills.get(s, 0)
+                skill_parts.append(_format_skill_line(s, lvl, xp))
     else:
-        skills_str = ", ".join(
-            f"{s} {xp_to_level(state.skills.get(s, 0))}" for s in ALL_SKILLS if state.skills.get(s, 0) > 0
-        )
-    if not skills_str:
-        skills_str = "All level 1"
+        for s in ALL_SKILLS:
+            xp = state.skills.get(s, 0)
+            if xp > 0:
+                lvl = xp_to_level(xp)
+                skill_parts.append(_format_skill_line(s, lvl, xp))
+    skills_str = ", ".join(skill_parts) if skill_parts else "All level 1"
 
+    # Equipment
+    equip_str = ""
+    if state.equipment:
+        equip_items = [f"{e.name}" for e in state.equipment if e.name]
+        if equip_items:
+            equip_str = ", ".join(equip_items)
+
+    # Inventory
     if state.inventory_slots:
         inv_items = [f"{s.name} x{s.count}" if s.count > 1 else s.name for s in state.inventory_slots]
         inv_str = ", ".join(inv_items) if inv_items else "Empty"
     else:
         inv_str = ", ".join(f"{item} x{qty}" for item, qty in state.inventory.items()) if state.inventory else "Empty"
 
-    nearby_parts: list[str] = []
+    # Nearby NPCs — with combat level, distance, HP if damaged
+    npc_parts: list[str] = []
     if state.nearby_npcs:
-        for npc in state.nearby_npcs[:10]:
-            combat_str = f" (lvl {npc.combat_level})" if npc.combat_level > 0 else ""
-            hp_npc = f" HP:{npc.hp}/{npc.max_hp}" if npc.max_hp > 0 else ""
-            nearby_parts.append(f"{npc.name}{combat_str}{hp_npc}")
-    if state.nearby_locs:
-        for loc in state.nearby_locs[:10]:
-            opts = f" [{', '.join(loc.options)}]" if loc.options else ""
-            nearby_parts.append(f"{loc.name}{opts}")
-    if state.ground_items:
-        for gi in state.ground_items[:5]:
-            qty = f" x{gi.count}" if gi.count > 1 else ""
-            nearby_parts.append(f"[Ground] {gi.name}{qty}")
-    if not nearby_parts and state.nearby:
-        nearby_parts = list(state.nearby)
-    nearby_str = ", ".join(nearby_parts) if nearby_parts else "Nothing notable"
+        for npc in state.nearby_npcs[:8]:
+            parts: list[str] = []
+            if npc.combat_level > 0:
+                parts.append(f"lvl {npc.combat_level}")
+            parts.append(f"dist {npc.distance}")
+            if npc.max_hp > 0 and npc.hp < npc.max_hp:
+                parts.append(f"HP {npc.hp}/{npc.max_hp}")
+            if npc.in_combat:
+                parts.append("fighting")
+            meta = ", ".join(parts)
+            opts_str = f" [{', '.join(npc.options)}]" if npc.options else ""
+            npc_parts.append(f"  {npc.name} ({meta}){opts_str}")
 
-    lines = [
-        f"Position: {pos_str}",
-        f"HP: {state.hp}/{state.max_hp}",
-        f"Skills: {skills_str}",
-        f"Inventory ({state.inventory_count()}/28): [{inv_str}]",
-        f"Nearby: [{nearby_str}]",
-    ]
-    if state.in_combat:
-        lines.insert(2, "Status: IN COMBAT")
+    # Nearby objects/locs — with distance and interaction options
+    loc_parts: list[str] = []
+    if state.nearby_locs:
+        for loc in state.nearby_locs[:8]:
+            opts_str = f" [{', '.join(loc.options)}]" if loc.options else ""
+            loc_parts.append(f"  {loc.name} (dist {loc.distance}){opts_str}")
+
+    # Ground items — with distance and reachability
+    ground_parts: list[str] = []
+    if state.ground_items:
+        for gi in state.ground_items[:6]:
+            qty = f" x{gi.count}" if gi.count > 1 else ""
+            reach_str = ""
+            if gi.reachable is False:
+                reach_str = ", BLOCKED"
+            elif gi.reachable is True:
+                reach_str = ""
+            ground_parts.append(f"  {gi.name}{qty} (dist {gi.distance}{reach_str})")
+
+    # Fallback if no structured nearby data
+    if not npc_parts and not loc_parts and not ground_parts and state.nearby:
+        npc_parts = [f"  {name}" for name in state.nearby]
+
+    # Build output
+    lines: list[str] = []
     if state.tick > 0:
-        lines.insert(0, f"Tick: {state.tick}")
+        lines.append(f"Tick: {state.tick}")
+    lines.append(f"Position: {pos_str}")
+    lines.append(f"HP: {state.hp}/{state.max_hp}")
+    if state.in_combat:
+        lines.append("Status: IN COMBAT")
+    lines.append(f"Skills: {skills_str}")
+    if equip_str:
+        lines.append(f"Equipment: {equip_str}")
+    lines.append(f"Inventory ({state.inventory_count()}/28): [{inv_str}]")
+
+    if npc_parts:
+        lines.append("NPCs:")
+        lines.extend(npc_parts)
+    if loc_parts:
+        lines.append("Objects:")
+        lines.extend(loc_parts)
+    if ground_parts:
+        lines.append("Ground items:")
+        lines.extend(ground_parts)
+    if not npc_parts and not loc_parts and not ground_parts:
+        lines.append("Nearby: Nothing notable")
 
     return "\n".join(lines)
+
+
+def format_action_prerequisites(action_name: str) -> str | None:
+    """Return prerequisite hint for an action, or None if no prerequisites known."""
+    prereqs = ACTION_PREREQUISITES.get(action_name)
+    if not prereqs:
+        return None
+    return f"Requires: {', '.join(prereqs)}"
 
 
 def build_messages(state: GameState) -> list[dict]:

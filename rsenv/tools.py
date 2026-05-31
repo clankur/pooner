@@ -207,6 +207,19 @@ LEVEL_REQUIREMENTS: dict[str, int] = {
     "cookItem": 1,
 }
 
+# Items/conditions needed for each action to succeed
+ACTION_PREREQUISITES: dict[str, list[str]] = {
+    "fletchLogs": ["Knife in inventory", "Logs in inventory"],
+    "cookItem": ["Raw food in inventory", "Range or Fire nearby"],
+    "smithItem": ["Metal bar in inventory", "Anvil nearby", "Hammer in inventory"],
+    "craftItem": ["Needle + Thread in inventory (leather)", "or Chisel (gems)"],
+    "chopTree": ["Axe equipped or in inventory"],
+    "mineRock": ["Pickaxe equipped or in inventory"],
+    "catchFish": ["Net/Rod/Cage in inventory (depends on spot)"],
+    "castSpell": ["Required runes in inventory"],
+    "buryBones": ["Bones in inventory"],
+}
+
 
 # ─── Schema generation ────────────────────────────────────────────────────
 

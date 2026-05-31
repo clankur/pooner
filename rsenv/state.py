@@ -88,6 +88,7 @@ class GroundItemInfo:
     x: int
     z: int
     distance: int
+    reachable: bool | None = None
 
 
 @dataclass

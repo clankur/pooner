@@ -72,6 +72,7 @@ interface StateResponse {
       x: number;
       z: number;
       distance: number;
+      reachable: boolean | null;
     }[];
     hp: number;
     maxHp: number;
@@ -164,6 +165,8 @@ function formatState(state: BotWorldState): StateResponse {
         x: g.x,
         z: g.z,
         distance: g.distance,
+        // SDK doesn't expose pathfinding — null means unknown reachability
+        reachable: null,
       })),
       hp: player?.hp ?? 0,
       maxHp: player?.maxHp ?? 0,
