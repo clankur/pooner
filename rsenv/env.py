@@ -98,8 +98,12 @@ def format_state(state: GameState) -> str:
             if npc.in_combat:
                 attrs += ' in_combat="true"'
             if npc.options:
-                attrs += f' options="{",".join(npc.options)}"'
-            lines.append(f"<npc {attrs}/>")
+                lines.append(f"<npc {attrs}>")
+                for opt in npc.options:
+                    lines.append(f"  <action>{opt}</action>")
+                lines.append("</npc>")
+            else:
+                lines.append(f"<npc {attrs}/>")
         lines.append("</npcs>")
 
     # Nearby objects/locs
@@ -112,7 +116,13 @@ def format_state(state: GameState) -> str:
                 attrs += ' state="closed"'
             elif "Close" in loc.options:
                 attrs += ' state="open"'
-            lines.append(f"<object {attrs}/>")
+            if loc.options:
+                lines.append(f"<object {attrs}>")
+                for opt in loc.options:
+                    lines.append(f"  <action>{opt}</action>")
+                lines.append("</object>")
+            else:
+                lines.append(f"<object {attrs}/>")
         lines.append("</objects>")
 
     # Ground items
