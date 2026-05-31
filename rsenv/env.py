@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
 from rsenv.client import RSClient
 from rsenv.state import ALL_SKILLS, XP_FOR_LEVEL, GameState, Trajectory, xp_to_level
-from rsenv.tools import ACTION_PREREQUISITES, TOOL_SCHEMAS, parse_tool_calls
+from rsenv.tools import TOOL_SCHEMAS, parse_tool_calls
 
 logger = logging.getLogger(__name__)
 
@@ -56,24 +56,17 @@ def format_state(state: GameState) -> str:
 
     # Skills: show level + xp-to-next for trained skills
     skill_parts: list[str] = []
-    if state.skill_levels:
-        for s in ALL_SKILLS:
-            lvl = state.skill_levels.get(s, 1)
-            if lvl > 1:
-                xp = state.skills.get(s, 0)
-                skill_parts.append(_format_skill_line(s, lvl, xp))
-    else:
-        for s in ALL_SKILLS:
-            xp = state.skills.get(s, 0)
-            if xp > 0:
-                lvl = xp_to_level(xp)
-                skill_parts.append(_format_skill_line(s, lvl, xp))
+    for s in ALL_SKILLS:
+        xp = state.skills.get(s, 0)
+        lvl = state.skill_levels.get(s) or xp_to_level(xp)
+        if lvl > 1:
+            skill_parts.append(_format_skill_line(s, lvl, xp))
     skills_str = ", ".join(skill_parts) if skill_parts else "All level 1"
 
     # Equipment
     equip_str = ""
     if state.equipment:
-        equip_items = [f"{e.name}" for e in state.equipment if e.name]
+        equip_items = [e.name for e in state.equipment if e.name]
         if equip_items:
             equip_str = ", ".join(equip_items)
 
@@ -150,14 +143,6 @@ def format_state(state: GameState) -> str:
         lines.append("Nearby: Nothing notable")
 
     return "\n".join(lines)
-
-
-def format_action_prerequisites(action_name: str) -> str | None:
-    """Return prerequisite hint for an action, or None if no prerequisites known."""
-    prereqs = ACTION_PREREQUISITES.get(action_name)
-    if not prereqs:
-        return None
-    return f"Requires: {', '.join(prereqs)}"
 
 
 def build_messages(state: GameState) -> list[dict]:
@@ -301,27 +286,30 @@ def rollout_trajectory(
     num_valid = 0
     _logged_first = False
 
+    generate_kwargs: dict = {
+        "max_new_tokens": max_new_tokens,
+        "temperature": temperature,
+        "do_sample": True,
+        "pad_token_id": tokenizer.pad_token_id,
+        "eos_token_id": stop_ids,
+        "return_dict_in_generate": True,
+        "output_scores": True,
+    }
+    if pixel_values is not None:
+        generate_kwargs["pixel_values"] = pixel_values.to(device)
+        if image_grid_thw is not None:
+            generate_kwargs["image_grid_thw"] = image_grid_thw.to(device)
+
     model.eval()
     for _action_idx in range(max_actions):
         input_ids = torch.tensor([all_token_ids], device=device)
 
-        generate_kwargs: dict = {
-            "max_new_tokens": max_new_tokens,
-            "temperature": temperature,
-            "do_sample": True,
-            "pad_token_id": tokenizer.pad_token_id,
-            "eos_token_id": stop_ids,
-            "return_dict_in_generate": True,
-            "output_scores": True,
-        }
-        # Pass image embeddings on the first generation (they correspond to prompt tokens)
-        if _action_idx == 0 and pixel_values is not None:
-            generate_kwargs["pixel_values"] = pixel_values.to(device)
-            if image_grid_thw is not None:
-                generate_kwargs["image_grid_thw"] = image_grid_thw.to(device)
-
         with torch.no_grad():
             outputs = model.generate(input_ids, **generate_kwargs)
+
+        # Image embeddings only needed on first pass — remove after use
+        generate_kwargs.pop("pixel_values", None)
+        generate_kwargs.pop("image_grid_thw", None)
 
         new_ids = outputs.sequences[0, len(all_token_ids) :]
         new_text = tokenizer.decode(new_ids, skip_special_tokens=False)

@@ -99,12 +99,23 @@ type Response = StateResponse | ActionResultResponse | ErrorResponse;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────
 
+const PATH_BLOCKED_HINT = " Path may be blocked — look for doors to open.";
+
 function log(msg: string): void {
   process.stderr.write(`[bridge] ${msg}\n`);
 }
 
 function send(response: Response): void {
   process.stdout.write(JSON.stringify(response) + "\n");
+}
+
+async function attachScreenshot(sdk: BotSDK, response: StateResponse): Promise<void> {
+  try {
+    const dataUrl = await sdk.sendScreenshot(5000);
+    response.data.screenshot = dataUrl;
+  } catch {
+    log("Screenshot capture failed, continuing without it");
+  }
 }
 
 function formatState(state: BotWorldState): StateResponse {
@@ -282,7 +293,7 @@ async function executeAction(
         success = result.success;
         message = result.message;
         if (!success) {
-          message += " Path may be blocked — look for doors to open.";
+          message += PATH_BLOCKED_HINT;
         }
         break;
       }
@@ -504,7 +515,7 @@ async function executeAction(
         success = result.success;
         message = result.message;
         if (!success && !result.reason?.includes("not_found")) {
-          message += " Path may be blocked — look for doors to open.";
+          message += PATH_BLOCKED_HINT;
         }
         reason = result.reason;
         break;
@@ -654,12 +665,7 @@ async function main(): Promise<void> {
   const initialState = sdk.getState();
   if (initialState?.inGame) {
     const response = formatState(initialState);
-    try {
-      const dataUrl = await sdk.sendScreenshot(5000);
-      response.data.screenshot = dataUrl;
-    } catch {
-      log("Initial screenshot capture failed, continuing without it");
-    }
+    await attachScreenshot(sdk, response);
     send(response);
   } else {
     send({ type: "error", message: "Bot not in game after 60s wait" });
@@ -699,12 +705,7 @@ async function main(): Promise<void> {
         if (state) {
           const response = formatState(state);
           if (cmd.includeScreenshot) {
-            try {
-              const dataUrl = await sdk.sendScreenshot(5000);
-              response.data.screenshot = dataUrl;
-            } catch {
-              log("Screenshot capture failed, continuing without it");
-            }
+            await attachScreenshot(sdk, response);
           }
           send(response);
         } else {

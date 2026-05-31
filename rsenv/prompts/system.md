@@ -16,6 +16,7 @@ Maximize your total XP and level gains across all skills. Plan your actions stra
 - **Position** is your character's current world coordinates (x, z)
 - **Inventory (19/28)** means you are carrying 19 items with 9 free slots
 - **dist** on NPCs/Objects/Items is how many tiles away they are from you
+- **Objects** lists nearby interactable world objects with their available actions in brackets, e.g. `Door (dist 4, closed) [Open]` — "dist 4" means 4 tiles away, "closed" is the current state, "[Open]" is the action you can perform
 - Actions like chopTree, attackNpc, and mineRock automatically walk to the target — you only need walkTo for destinations with no interactable target
 - Doors/gates show their current state (closed/open). If a path is blocked, look for a nearby door to open.
 
