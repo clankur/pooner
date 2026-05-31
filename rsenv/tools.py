@@ -7,10 +7,11 @@ Single source of truth for tool schemas. Used for:
 """
 
 import logging
-import re
 from enum import Enum
 
 from pydantic import BaseModel, Field
+
+from rsenv.tool_parser import extract_tool_call
 
 # ─── Tool argument models ─────────────────────────────────────────────────
 
@@ -251,67 +252,26 @@ TOOL_SCHEMAS: list[dict] = to_chat_schemas()
 
 # ─── Parsing ──────────────────────────────────────────────────────────────
 
-
-class ToolCall(BaseModel):
-    """Parsed tool call from model output."""
-
-    name: str
-    arguments: dict
-
-
 logger = logging.getLogger(__name__)
-
-_TAG_OPEN = "<tool_call>"
-_TAG_CLOSE = "</tool_call>"
-
-# Qwen3.5 XML tool call: <function=name><parameter=key>value</parameter>...</function>
-_FUNC_RE = re.compile(r"<function=(\w+)>(.*?)</function>", re.DOTALL)
-_PARAM_RE = re.compile(r"<parameter=(\w+)>\s*(.*?)\s*</parameter>", re.DOTALL)
-
-
-def _parse_xml_tool_call(raw: str) -> ToolCall | None:
-    """Parse Qwen3.5's XML-style tool call format."""
-    m = _FUNC_RE.search(raw)
-    if not m:
-        return None
-    name = m.group(1)
-    args: dict[str, str] = {}
-    for pm in _PARAM_RE.finditer(m.group(2)):
-        args[pm.group(1)] = pm.group(2)
-    return ToolCall(name=name, arguments=args)
 
 
 def parse_tool_call(text: str) -> tuple[str, BaseModel] | None:
-    """Parse a tool call from model output, supporting both JSON and Qwen3.5 XML formats."""
-    start = text.find(_TAG_OPEN)
-    if start == -1:
-        return None
-    end = text.find(_TAG_CLOSE, start)
-    if end == -1:
+    """Parse a tool call from model output and validate against known tool schemas."""
+    result = extract_tool_call(text)
+    if result is None:
         return None
 
-    raw = text[start + len(_TAG_OPEN) : end].strip()
+    name, raw_args = result
 
-    # Try JSON first (Qwen3 format), then XML (Qwen3.5 format)
-    call: ToolCall | None = None
-    try:
-        call = ToolCall.model_validate_json(raw)
-    except Exception:
-        call = _parse_xml_tool_call(raw)
-
-    if call is None:
-        logger.info("Tool call parse failed | raw: %s", raw[:200])
-        return None
-
-    model_cls = TOOL_MODELS.get(call.name)
+    model_cls = TOOL_MODELS.get(name)
     if model_cls is None:
-        logger.info("Unknown tool name: %s", call.name)
+        logger.info("Unknown tool name: %s", name)
         return None
 
     try:
-        validated_args = model_cls.model_validate(call.arguments)
+        validated_args = model_cls.model_validate(raw_args)
     except Exception as e:
-        logger.info("Tool args validation failed for %s: %s", call.name, e)
+        logger.info("Tool args validation failed for %s: %s", name, e)
         return None
 
-    return call.name, validated_args
+    return name, validated_args
