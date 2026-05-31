@@ -157,8 +157,16 @@ class BridgeClient(RSClient):
 
         import os
 
+        # Ensure bun is findable (common install locations)
+        path = os.environ.get("PATH", "")
+        home = os.path.expanduser("~")
+        for bun_dir in [f"{home}/.bun/bin", "/opt/homebrew/bin", "/usr/local/bin"]:
+            if bun_dir not in path:
+                path = f"{bun_dir}:{path}"
+
         env = {
             **os.environ,
+            "PATH": path,
             "RS_GATEWAY": self.gateway_url,
             "RS_BOT_USERNAME": self.bot_username,
             "RS_BOT_PASSWORD": self.bot_password,
