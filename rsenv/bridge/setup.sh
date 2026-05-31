@@ -23,6 +23,12 @@ cd "$SDK_DIR"
 echo "Installing rs-sdk dependencies..."
 bun install
 
+# Fix case-sensitivity issue on Linux (macOS is case-insensitive so it works there)
+if [ "$(uname)" = "Linux" ] && [ -f server/webclient/src/io/Jagfile.ts ] && [ ! -e server/webclient/src/io/JagFile.ts ]; then
+    ln -sf Jagfile.ts server/webclient/src/io/JagFile.ts
+    echo "Fixed Jagfile.ts -> JagFile.ts case mismatch for Linux"
+fi
+
 # Create bot accounts if they don't exist
 for BOT_NAME in grpobot1 monitor1; do
     if [ ! -d "$SDK_DIR/bots/$BOT_NAME" ]; then

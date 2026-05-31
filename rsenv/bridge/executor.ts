@@ -581,14 +581,18 @@ async function main(): Promise<void> {
 
   const gatewayUrl = deriveGatewayUrl(process.env.RS_GATEWAY ?? "");
 
+  // Detect headless: no DISPLAY on Linux, or HEADLESS=true env var
+  const isHeadless = process.env.HEADLESS === "true" || process.env.HEADLESS === "1"
+    || (process.platform === "linux" && !process.env.DISPLAY);
+
   log(`Connecting to gateway: ${gatewayUrl}`);
-  log(`Bot username: ${username}`);
+  log(`Bot username: ${username} (headless: ${isHeadless})`);
 
   const sdk = new BotSDK({
     botUsername: username,
     password,
     gatewayUrl,
-    autoLaunchBrowser: true,
+    autoLaunchBrowser: !isHeadless,
     autoReconnect: true,
     showChat: false,
   });
@@ -604,7 +608,15 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // Wait for the bot client to be in-game (browser needs time to load)
+  // On headless systems, launch bot client via puppeteer
+  if (isHeadless) {
+    log("Headless mode: launching bot client via puppeteer...");
+    const { launchBotBrowser } = await import("./rs-sdk/sdk/test/utils/browser");
+    await launchBotBrowser(username, { headless: true, useSharedBrowser: false });
+    log("Puppeteer bot client launched");
+  }
+
+  // Wait for the bot client to be in-game
   log("Waiting for bot to enter game world...");
   const maxWaitMs = 60_000;
   const pollMs = 1_000;
