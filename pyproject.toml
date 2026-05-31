@@ -17,10 +17,9 @@ dependencies = [
 
 [project.optional-dependencies]
 cpu = ["torch"]
-gpu = ["torch", "flash-linear-attention>=0.4", "causal-conv1d>=1.5"]
+gpu = ["torch"]
 
 [tool.uv]
-no-build-isolation-package = ["flash-linear-attention", "causal-conv1d"]
 conflicts = [
     [
         { extra = "cpu" },
