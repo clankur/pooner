@@ -100,7 +100,7 @@ def format_state(state: GameState) -> str:
             if npc.options:
                 lines.append(f"<npc {attrs}>")
                 for opt in npc.options:
-                    lines.append(f"  <action>{opt}</action>")
+                    lines.append(f"  <option>{opt}</option>")
                 lines.append("</npc>")
             else:
                 lines.append(f"<npc {attrs}/>")
@@ -119,7 +119,7 @@ def format_state(state: GameState) -> str:
             if loc.options:
                 lines.append(f"<object {attrs}>")
                 for opt in loc.options:
-                    lines.append(f"  <action>{opt}</action>")
+                    lines.append(f"  <option>{opt}</option>")
                 lines.append("</object>")
             else:
                 lines.append(f"<object {attrs}/>")
