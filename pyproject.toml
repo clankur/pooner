@@ -13,13 +13,12 @@ dependencies = [
     "pydantic>=2.0",
     "wandb",
     "runq",
-    "torchvision",
     "pillow",
 ]
 
 [project.optional-dependencies]
-cpu = ["torch"]
-gpu = ["torch"]
+cpu = ["torch", "torchvision"]
+gpu = ["torch", "torchvision"]
 
 [tool.uv]
 conflicts = [
@@ -31,6 +30,10 @@ conflicts = [
 
 [tool.uv.sources]
 torch = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cu128", extra = "gpu" },
+]
+torchvision = [
     { index = "pytorch-cpu", extra = "cpu" },
     { index = "pytorch-cu128", extra = "gpu" },
 ]
