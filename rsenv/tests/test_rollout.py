@@ -1,4 +1,4 @@
-"""E2E rollout test: load Qwen3-4B, generate a trajectory with BridgeClient, verify structure."""
+"""E2E rollout test: load Qwen3.5-4B, generate a trajectory with BridgeClient, verify structure."""
 
 import pytest
 import torch
@@ -7,7 +7,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from rsenv import BridgeClient, format_state, rollout_trajectory
 from rsenv.state import GameState
 
-MODEL_ID = "Qwen/Qwen3-4B"
+MODEL_ID = "Qwen/Qwen3.5-4B"
 
 
 @pytest.fixture(scope="module")
