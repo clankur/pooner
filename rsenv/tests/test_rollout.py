@@ -47,7 +47,7 @@ def test_rollout_with_bridge(model_and_processor, bridge_client):
         processor=processor,
         initial_state=state,
         max_actions=3,
-        max_new_tokens=8192,
+        max_new_tokens=4096,
         temperature=0.7,
         device=device,
         client=bridge_client,
