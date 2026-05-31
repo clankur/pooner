@@ -48,7 +48,7 @@ def test_rollout_with_bridge(model_and_tokenizer, bridge_client):
         tokenizer=tokenizer,
         initial_state=state,
         max_actions=3,
-        max_new_tokens=256,
+        max_new_tokens=4096,
         temperature=0.7,
         device=device,
         client=bridge_client,
