@@ -13,10 +13,11 @@ Maximize your total XP and level gains across all skills. Plan your actions stra
 
 ## Reading the game state
 
-- "Inventory (19/28)" means 19 items carried, 9 free slots remaining
-- "dist 5" means 5 tiles away — tools auto-walk to targets, you don't need to walkTo first
-- Your current Position is where you already are — don't walk to your own coordinates
-- NPCs, Objects, and Ground Items listed are what's near you right now and interactable
+- **Position** is your character's current world coordinates (x, z)
+- **Inventory (19/28)** means you are carrying 19 items with 9 free slots
+- **dist** on NPCs/Objects/Items is how many tiles away they are from you
+- Actions like chopTree, attackNpc, and mineRock automatically walk to the target — you only need walkTo for destinations with no interactable target
+- Doors/gates show their current state (closed/open). If a path is blocked, look for a nearby door to open.
 
 ## Game knowledge
 
@@ -25,6 +26,5 @@ Maximize your total XP and level gains across all skills. Plan your actions stra
 - Trees: Tree (WC 1, 25xp), Oak (WC 15, 37.5xp), Willow (WC 30, 67.5xp)
 - Rocks: Copper/Tin (Mining 1, 17.5xp), Iron (Mining 15, 35xp)
 - Combat: Attack NPCs for Attack/Strength/Defence/Hitpoints XP. Eat food to heal.
-- Doors/gates show their current state (closed/open). If a path is blocked, look for a nearby door to open.
 - A Knife is a specific item — daggers, swords, and other weapons cannot substitute for it.
 - You start in Lumbridge. The bank is north in the castle.
