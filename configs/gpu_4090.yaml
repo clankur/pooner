@@ -7,8 +7,13 @@ model:
   model_name_or_path: "Qwen/Qwen3.5-4B"
   quantize_int4: true
 
+lora:
+  enabled: true
+  rank: 16
+  alpha: 32
+
 grpo:
-  learning_rate: 1.e-5
+  learning_rate: 2.e-4
   max_steps: 5000
   log_interval: 10
   checkpoint_interval: 200

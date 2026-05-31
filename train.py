@@ -17,6 +17,8 @@ import torch
 import wandb
 from einops import rearrange
 from omegaconf import DictConfig, OmegaConf
+from peft import LoraConfig as PeftLoraConfig
+from peft import PeftModel, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from rsenv import BridgeClient, SimClient, Trajectory, load_prompt_bank, rollout_trajectory
@@ -32,6 +34,23 @@ class ModelConfig:
     quantize_int4: bool = True
     max_new_tokens: int = 512
     temperature: float = 0.8
+
+
+@dataclass(frozen=True)
+class LoraConfig:
+    enabled: bool = True
+    rank: int = 16
+    alpha: int = 32
+    dropout: float = 0.05
+    target_modules: tuple[str, ...] = (
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "o_proj",
+        "gate_proj",
+        "up_proj",
+        "down_proj",
+    )
 
 
 @dataclass(frozen=True)
@@ -68,14 +87,20 @@ class Paths:
 class Config:
     model: ModelConfig = None
     grpo: GRPOConfig = None
+    lora: LoraConfig = None
     env: EnvConfig = None
     paths: Paths = None
 
 
 def build_config(cfg: DictConfig) -> Config:
+    lora_dict = dict(cfg.lora)
+    # Hydra deserializes lists; frozen dataclass needs a tuple
+    if "target_modules" in lora_dict and not isinstance(lora_dict["target_modules"], tuple):
+        lora_dict["target_modules"] = tuple(lora_dict["target_modules"])
     return Config(
         model=ModelConfig(**cfg.model),
         grpo=GRPOConfig(**cfg.grpo),
+        lora=LoraConfig(**lora_dict),
         env=EnvConfig(**cfg.env),
         paths=Paths(**cfg.paths),
     )
@@ -84,21 +109,21 @@ def build_config(cfg: DictConfig) -> Config:
 # ─── Model loading ─────────────────────────────────────────────────────────
 
 
-def load_model(config: ModelConfig, device: torch.device) -> tuple:
-    """Load model + tokenizer. Apply torchao int4 quantization if configured."""
-    tokenizer = AutoTokenizer.from_pretrained(config.model_name_or_path)
+def load_model(
+    model_config: ModelConfig, lora_config: LoraConfig, device: torch.device
+) -> tuple[AutoModelForCausalLM | PeftModel, AutoTokenizer]:
+    """Load model + tokenizer. Apply int4 quantization then LoRA adapters if configured."""
+    tokenizer = AutoTokenizer.from_pretrained(model_config.model_name_or_path)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     model = AutoModelForCausalLM.from_pretrained(
-        config.model_name_or_path,
+        model_config.model_name_or_path,
         dtype=torch.bfloat16,
         device_map={"": device} if device.type == "cuda" else None,
     )
 
-    if config.quantize_int4:
-        # QAT: fake-quantized int4 weights during forward (simulates int4 precision),
-        # but gradients flow through in bf16 so all parameters remain trainable.
+    if model_config.quantize_int4:
         from torchao.quantization.qat import Int4WeightOnlyQATQuantizer
 
         qat = Int4WeightOnlyQATQuantizer(groupsize=128)
@@ -106,6 +131,22 @@ def load_model(config: ModelConfig, device: torch.device) -> tuple:
 
     if device.type != "cuda":
         model = model.to(device)
+
+    if lora_config.enabled:
+        # Freeze base model, attach trainable LoRA adapters
+        for p in model.parameters():
+            p.requires_grad = False
+
+        peft_config = PeftLoraConfig(
+            r=lora_config.rank,
+            lora_alpha=lora_config.alpha,
+            lora_dropout=lora_config.dropout,
+            target_modules=list(lora_config.target_modules),
+            bias="none",
+            task_type="CAUSAL_LM",
+        )
+        model = get_peft_model(model, peft_config)
+        model.print_trainable_parameters()
 
     model.gradient_checkpointing_enable()
     return model, tokenizer
@@ -303,12 +344,36 @@ def _report_wandb_url_to_runq(wandb_url: str | None) -> None:
         pass
 
 
+def _save_checkpoint(
+    model: AutoModelForCausalLM | PeftModel,
+    optimizer: torch.optim.Optimizer,
+    step: int,
+    model_dir: str,
+    lora_enabled: bool,
+    tag: str | None = None,
+) -> None:
+    """Save checkpoint: LoRA adapters via peft save_pretrained, or full state_dict otherwise."""
+    suffix = tag if tag else str(step)
+    if lora_enabled:
+        adapter_dir = os.path.join(model_dir, f"adapter_{suffix}")
+        model.save_pretrained(adapter_dir)
+        opt_path = os.path.join(adapter_dir, "optimizer.pt")
+        torch.save({"optimizer": optimizer.state_dict(), "step": step}, opt_path)
+        print(f"  -> saved adapter {adapter_dir}", flush=True)
+    else:
+        ckpt_path = os.path.join(model_dir, f"checkpoint_{suffix}.pt")
+        torch.save({"model": model.state_dict(), "optimizer": optimizer.state_dict(), "step": step}, ckpt_path)
+        print(f"  -> saved {ckpt_path}", flush=True)
+
+
 def train(config: Config) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     torch.manual_seed(config.grpo.seed)
 
-    print(f"Loading model: {config.model.model_name_or_path} (int4={config.model.quantize_int4})")
-    model, tokenizer = load_model(config.model, device)
+    print(
+        f"Loading model: {config.model.model_name_or_path} (int4={config.model.quantize_int4}, lora={config.lora.enabled})"
+    )
+    model, tokenizer = load_model(config.model, config.lora, device)
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Trainable parameters: {trainable_params:,}")
 
@@ -467,14 +532,10 @@ def train(config: Config) -> None:
             )
 
         if config.grpo.checkpoint_interval > 0 and step > 0 and step % config.grpo.checkpoint_interval == 0:
-            ckpt_path = os.path.join(model_dir, f"checkpoint_{step}.pt")
-            torch.save({"model": model.state_dict(), "optimizer": optimizer.state_dict(), "step": step}, ckpt_path)
-            print(f"  -> saved {ckpt_path}", flush=True)
+            _save_checkpoint(model, optimizer, step, model_dir, config.lora.enabled)
 
     # ── Final save ──
-    final_path = os.path.join(model_dir, "checkpoint_final.pt")
-    torch.save({"model": model.state_dict(), "optimizer": optimizer.state_dict(), "step": step}, final_path)
-    print(f"  -> saved {final_path}", flush=True)
+    _save_checkpoint(model, optimizer, step, model_dir, config.lora.enabled, tag="final")
 
     metrics_path = os.path.join(model_dir, "metrics.jsonl")
     with open(metrics_path, "w") as f:

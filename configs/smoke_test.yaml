@@ -10,6 +10,9 @@ model:
   max_new_tokens: 32
   temperature: 1.0
 
+lora:
+  enabled: false
+
 grpo:
   group_size: 2
   max_steps: 3
