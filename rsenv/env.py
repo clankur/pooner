@@ -103,8 +103,7 @@ def format_state(state: GameState) -> str:
                 state_label = ", closed"
             elif "Close" in loc.options:
                 state_label = ", open"
-            opts_str = f" [{', '.join(loc.options)}]" if loc.options else ""
-            loc_parts.append(f"  {loc.name} (dist {loc.distance}{state_label}){opts_str}")
+            loc_parts.append(f"  {loc.name} (dist {loc.distance}{state_label})")
 
     # Ground items — with distance
     ground_parts: list[str] = []
