@@ -5,13 +5,19 @@ drives the plan-then-execute loop. Everything game-specific is in
 state.py (data), tools.py (actions), and client.py (execution).
 """
 
+from __future__ import annotations
+
+import base64
 import logging
 import random
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import torch
 from pydantic import BaseModel
-from transformers import PreTrainedModel, PreTrainedTokenizerBase
+
+if TYPE_CHECKING:
+    from transformers import AutoProcessor, PreTrainedModel
 
 from rsenv.client import RSClient
 from rsenv.state import ALL_SKILLS, XP_FOR_LEVEL, GameState, Trajectory, xp_to_level
@@ -95,23 +101,24 @@ def format_state(state: GameState) -> str:
             npc_parts.append(f"  {npc.name} ({meta}){opts_str}")
 
     # Nearby objects/locs — with distance and interaction options
+    # Option labels are actions, not states: "Open" means currently closed, "Close" means currently open
     loc_parts: list[str] = []
     if state.nearby_locs:
         for loc in state.nearby_locs[:8]:
+            state_label = ""
+            if "Open" in loc.options:
+                state_label = ", closed"
+            elif "Close" in loc.options:
+                state_label = ", open"
             opts_str = f" [{', '.join(loc.options)}]" if loc.options else ""
-            loc_parts.append(f"  {loc.name} (dist {loc.distance}){opts_str}")
+            loc_parts.append(f"  {loc.name} (dist {loc.distance}{state_label}){opts_str}")
 
-    # Ground items — with distance and reachability
+    # Ground items — with distance
     ground_parts: list[str] = []
     if state.ground_items:
         for gi in state.ground_items[:6]:
             qty = f" x{gi.count}" if gi.count > 1 else ""
-            reach_str = ""
-            if gi.reachable is False:
-                reach_str = ", BLOCKED"
-            elif gi.reachable is True:
-                reach_str = ""
-            ground_parts.append(f"  {gi.name}{qty} (dist {gi.distance}{reach_str})")
+            ground_parts.append(f"  {gi.name}{qty} (dist {gi.distance})")
 
     # Fallback if no structured nearby data
     if not npc_parts and not loc_parts and not ground_parts and state.nearby:
@@ -154,10 +161,19 @@ def format_action_prerequisites(action_name: str) -> str | None:
 
 
 def build_messages(state: GameState) -> list[dict]:
-    return [
-        {"role": "system", "content": load_system_prompt()},
-        {"role": "user", "content": format_state(state)},
-    ]
+    system_msg = {"role": "system", "content": load_system_prompt()}
+    state_text = format_state(state)
+
+    if state.screenshot:
+        b64 = base64.b64encode(state.screenshot).decode()
+        user_content = [
+            {"type": "image", "image": f"data:image/png;base64,{b64}"},
+            {"type": "text", "text": state_text},
+        ]
+    else:
+        user_content = state_text
+
+    return [system_msg, {"role": "user", "content": user_content}]
 
 
 def append_tool_call(messages: list[dict], name: str, args: BaseModel, think_text: str = "") -> None:
@@ -230,7 +246,7 @@ def load_prompt_bank(seed: int = 42) -> list[GameState]:
 
 def rollout_trajectory(
     model: PreTrainedModel,
-    tokenizer: PreTrainedTokenizerBase,
+    processor: "AutoProcessor",
     initial_state: GameState,
     max_actions: int,
     max_new_tokens: int,
@@ -242,6 +258,7 @@ def rollout_trajectory(
 
     If client is provided, actions execute through it (sim or live).
     If client is None, a temporary SimClient is created from initial_state.
+    Screenshots from the initial state are encoded as image tokens via the processor.
     """
     if client is not None:
         state = client.reset(initial_state)
@@ -251,22 +268,23 @@ def rollout_trajectory(
         client = SimClient(initial_state)
         state = client.get_state()
 
+    tokenizer = processor.tokenizer
     initial_xp = state.total_xp()
-    has_chat_template = getattr(tokenizer, "chat_template", None) is not None
-    messages = build_messages(state) if has_chat_template else None
+    messages = build_messages(state)
 
-    if has_chat_template:
-        prompt_text = tokenizer.apply_chat_template(
-            messages,
-            tools=TOOL_SCHEMAS,
-            tokenize=False,
-            add_generation_prompt=True,
-            enable_thinking=True,
-        )
-    else:
-        prompt_text = f"{load_system_prompt()}\n\n{format_state(state)}\n\n"
+    # Processor handles text tokenization + image encoding in one call
+    inputs = processor.apply_chat_template(
+        messages,
+        tools=TOOL_SCHEMAS,
+        tokenize=True,
+        add_generation_prompt=True,
+        return_dict=True,
+        return_tensors="pt",
+    )
+    prompt_ids = inputs["input_ids"][0]
+    pixel_values = inputs.get("pixel_values")
+    image_grid_thw = inputs.get("image_grid_thw")
 
-    prompt_ids = tokenizer.encode(prompt_text, return_tensors="pt", add_special_tokens=False)[0]
     prompt_len = len(prompt_ids)
 
     all_token_ids: list[int] = prompt_ids.tolist()
@@ -286,17 +304,23 @@ def rollout_trajectory(
     for _action_idx in range(max_actions):
         input_ids = torch.tensor([all_token_ids], device=device)
 
+        generate_kwargs: dict = {
+            "max_new_tokens": max_new_tokens,
+            "temperature": temperature,
+            "do_sample": True,
+            "pad_token_id": tokenizer.pad_token_id,
+            "eos_token_id": stop_ids,
+            "return_dict_in_generate": True,
+            "output_scores": True,
+        }
+        # Pass image embeddings on the first generation (they correspond to prompt tokens)
+        if _action_idx == 0 and pixel_values is not None:
+            generate_kwargs["pixel_values"] = pixel_values.to(device)
+            if image_grid_thw is not None:
+                generate_kwargs["image_grid_thw"] = image_grid_thw.to(device)
+
         with torch.no_grad():
-            outputs = model.generate(
-                input_ids,
-                max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                do_sample=True,
-                pad_token_id=tokenizer.pad_token_id,
-                eos_token_id=stop_ids,
-                return_dict_in_generate=True,
-                output_scores=True,
-            )
+            outputs = model.generate(input_ids, **generate_kwargs)
 
         new_ids = outputs.sequences[0, len(all_token_ids) :]
         new_text = tokenizer.decode(new_ids, skip_special_tokens=False)
@@ -334,21 +358,18 @@ def rollout_trajectory(
 
         obs_content = result.observation
 
-        if has_chat_template:
-            append_tool_call(messages, action_name, action_args, think_text)
-            append_tool_response(messages, obs_content)
-            full_text = tokenizer.apply_chat_template(
-                messages,
-                tools=TOOL_SCHEMAS,
-                tokenize=False,
-                add_generation_prompt=True,
-                enable_thinking=True,
-            )
-            full_ids = tokenizer.encode(full_text, return_tensors="pt", add_special_tokens=False)[0]
-            env_ids = full_ids[len(all_token_ids) :]
-        else:
-            obs_text = f"\n[Observation] {obs_content}\n\n"
-            env_ids = torch.tensor(tokenizer.encode(obs_text, add_special_tokens=False))
+        append_tool_call(messages, action_name, action_args, think_text)
+        append_tool_response(messages, obs_content)
+        full_inputs = processor.apply_chat_template(
+            messages,
+            tools=TOOL_SCHEMAS,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_dict=True,
+            return_tensors="pt",
+        )
+        full_ids = full_inputs["input_ids"][0]
+        env_ids = full_ids[len(all_token_ids) :]
 
         all_token_ids.extend(env_ids.tolist())
         gen_mask.extend([0] * len(env_ids))

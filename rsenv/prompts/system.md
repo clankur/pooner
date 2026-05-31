@@ -18,4 +18,6 @@ Maximize your total XP and level gains across all skills. Plan your actions stra
 - Trees: Tree (WC 1, 25xp), Oak (WC 15, 37.5xp), Willow (WC 30, 67.5xp)
 - Rocks: Copper/Tin (Mining 1, 17.5xp), Iron (Mining 15, 35xp)
 - Combat: Attack NPCs for Attack/Strength/Defence/Hitpoints XP. Eat food to heal.
+- Doors/gates show their current state (closed/open). If a path is blocked, look for a nearby door to open.
+- A Knife is a specific item — daggers, swords, and other weapons cannot substitute for it.
 - You start in Lumbridge. The bank is north in the castle.

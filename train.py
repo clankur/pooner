@@ -17,7 +17,7 @@ import torch
 import wandb
 from einops import rearrange
 from omegaconf import DictConfig, OmegaConf
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoProcessor, Qwen3_5ForConditionalGeneration
 
 from rsenv import BridgeClient, SimClient, Trajectory, load_prompt_bank, rollout_trajectory
 
@@ -84,21 +84,19 @@ def build_config(cfg: DictConfig) -> Config:
 # ─── Model loading ─────────────────────────────────────────────────────────
 
 
-def load_model(config: ModelConfig, device: torch.device) -> tuple:
-    """Load model + tokenizer. Apply torchao int4 quantization if configured."""
-    tokenizer = AutoTokenizer.from_pretrained(config.model_name_or_path)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+def load_model(config: ModelConfig, device: torch.device) -> tuple[Qwen3_5ForConditionalGeneration, AutoProcessor]:
+    """Load Qwen3.5 multimodal model + processor. Apply torchao int4 quantization if configured."""
+    processor = AutoProcessor.from_pretrained(config.model_name_or_path)
+    if processor.tokenizer.pad_token is None:
+        processor.tokenizer.pad_token = processor.tokenizer.eos_token
 
-    model = AutoModelForCausalLM.from_pretrained(
+    model = Qwen3_5ForConditionalGeneration.from_pretrained(
         config.model_name_or_path,
-        dtype=torch.bfloat16,
+        torch_dtype=torch.bfloat16,
         device_map={"": device} if device.type == "cuda" else None,
     )
 
     if config.quantize_int4:
-        # QAT: fake-quantized int4 weights during forward (simulates int4 precision),
-        # but gradients flow through in bf16 so all parameters remain trainable.
         from torchao.quantization.qat import Int4WeightOnlyQATQuantizer
 
         qat = Int4WeightOnlyQATQuantizer(groupsize=128)
@@ -108,14 +106,14 @@ def load_model(config: ModelConfig, device: torch.device) -> tuple:
         model = model.to(device)
 
     model.gradient_checkpointing_enable()
-    return model, tokenizer
+    return model, processor
 
 
-def load_ref_model(config: ModelConfig) -> AutoModelForCausalLM:
+def load_ref_model(config: ModelConfig) -> Qwen3_5ForConditionalGeneration:
     """Load a frozen reference model on CPU. Swapped to GPU briefly each step for fast logprob computation."""
-    ref_model = AutoModelForCausalLM.from_pretrained(
+    ref_model = Qwen3_5ForConditionalGeneration.from_pretrained(
         config.model_name_or_path,
-        dtype=torch.bfloat16,
+        torch_dtype=torch.bfloat16,
     )
     ref_model.eval()
     for p in ref_model.parameters():
@@ -124,7 +122,7 @@ def load_ref_model(config: ModelConfig) -> AutoModelForCausalLM:
 
 
 def compute_ref_logprobs(
-    ref_model: AutoModelForCausalLM,
+    ref_model: Qwen3_5ForConditionalGeneration,
     input_ids: torch.Tensor,
     attention_mask: torch.Tensor,
     device: torch.device,
@@ -142,7 +140,7 @@ def compute_ref_logprobs(
 
 
 def get_per_token_logprobs(
-    model: AutoModelForCausalLM,
+    model: Qwen3_5ForConditionalGeneration,
     input_ids: torch.Tensor,
     attention_mask: torch.Tensor,
 ) -> torch.Tensor:
@@ -187,7 +185,7 @@ class GroupData:
 
 def collate_trajectories(
     trajectories: list[Trajectory],
-    ref_model: AutoModelForCausalLM | None,
+    ref_model: Qwen3_5ForConditionalGeneration | None,
     device: torch.device,
 ) -> GroupData:
     """Collate K trajectories into padded tensors, compute advantages and ref log-probs."""
@@ -308,7 +306,7 @@ def train(config: Config) -> None:
     torch.manual_seed(config.grpo.seed)
 
     print(f"Loading model: {config.model.model_name_or_path} (int4={config.model.quantize_int4})")
-    model, tokenizer = load_model(config.model, device)
+    model, processor = load_model(config.model, device)
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Trainable parameters: {trainable_params:,}")
 
@@ -358,7 +356,7 @@ def train(config: Config) -> None:
         for _k in range(config.grpo.group_size):
             traj = rollout_trajectory(
                 model=model,
-                tokenizer=tokenizer,
+                processor=processor,
                 initial_state=state,
                 max_actions=config.env.max_actions,
                 max_new_tokens=config.model.max_new_tokens,

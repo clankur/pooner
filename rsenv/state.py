@@ -88,7 +88,6 @@ class GroundItemInfo:
     x: int
     z: int
     distance: int
-    reachable: bool | None = None
 
 
 @dataclass
@@ -117,6 +116,7 @@ class GameState:
     max_hp: int = 10
     in_combat: bool = False
     in_game: bool = False
+    screenshot: bytes | None = None
 
     def level_for_skill(self, skill: str) -> int:
         if skill in self.skill_levels:
@@ -153,6 +153,7 @@ class GameState:
             max_hp=self.max_hp,
             in_combat=self.in_combat,
             in_game=self.in_game,
+            screenshot=self.screenshot,
         )
 
 

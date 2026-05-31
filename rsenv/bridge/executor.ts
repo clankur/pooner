@@ -28,6 +28,7 @@ interface Command {
   type: "getState" | "action" | "reset";
   name?: string;
   arguments?: Record<string, unknown>;
+  includeScreenshot?: boolean;
 }
 
 interface StateResponse {
@@ -72,11 +73,11 @@ interface StateResponse {
       x: number;
       z: number;
       distance: number;
-      reachable: boolean | null;
     }[];
     hp: number;
     maxHp: number;
     inCombat: boolean;
+    screenshot?: string;
   };
 }
 
@@ -165,8 +166,6 @@ function formatState(state: BotWorldState): StateResponse {
         x: g.x,
         z: g.z,
         distance: g.distance,
-        // SDK doesn't expose pathfinding — null means unknown reachability
-        reachable: null,
       })),
       hp: player?.hp ?? 0,
       maxHp: player?.maxHp ?? 0,
@@ -282,6 +281,9 @@ async function executeAction(
         const result = await bot.walkTo(x, z);
         success = result.success;
         message = result.message;
+        if (!success) {
+          message += " Path may be blocked — look for doors to open.";
+        }
         break;
       }
 
@@ -501,6 +503,9 @@ async function executeAction(
         const result = await bot.pickupItem(new RegExp(itemName, "i"));
         success = result.success;
         message = result.message;
+        if (!success && !result.reason?.includes("not_found")) {
+          message += " Path may be blocked — look for doors to open.";
+        }
         reason = result.reason;
         break;
       }
@@ -645,10 +650,17 @@ async function main(): Promise<void> {
   await bot.skipTutorial();
   log("Tutorial check complete");
 
-  // Signal readiness by sending initial state
+  // Signal readiness by sending initial state (with screenshot for multimodal training)
   const initialState = sdk.getState();
   if (initialState?.inGame) {
-    send(formatState(initialState));
+    const response = formatState(initialState);
+    try {
+      const dataUrl = await sdk.sendScreenshot(5000);
+      response.data.screenshot = dataUrl;
+    } catch {
+      log("Initial screenshot capture failed, continuing without it");
+    }
+    send(response);
   } else {
     send({ type: "error", message: "Bot not in game after 60s wait" });
   }
@@ -685,7 +697,16 @@ async function main(): Promise<void> {
       if (cmd.type === "getState") {
         const state = sdk.getState();
         if (state) {
-          send(formatState(state));
+          const response = formatState(state);
+          if (cmd.includeScreenshot) {
+            try {
+              const dataUrl = await sdk.sendScreenshot(5000);
+              response.data.screenshot = dataUrl;
+            } catch {
+              log("Screenshot capture failed, continuing without it");
+            }
+          }
+          send(response);
         } else {
           send({ type: "error", message: "No game state available" });
         }
