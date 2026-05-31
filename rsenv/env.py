@@ -278,6 +278,7 @@ def rollout_trajectory(
         tools=TOOL_SCHEMAS,
         tokenize=True,
         add_generation_prompt=True,
+        enable_thinking=True,
         return_dict=True,
         return_tensors="pt",
     )
@@ -364,6 +365,7 @@ def rollout_trajectory(
             tools=TOOL_SCHEMAS,
             tokenize=True,
             add_generation_prompt=True,
+            enable_thinking=True,
             return_dict=True,
             return_tensors="pt",
         )
