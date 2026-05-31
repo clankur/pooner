@@ -11,6 +11,13 @@ Maximize your total XP and level gains across all skills. Plan your actions stra
 3. After each action you will receive an observation with the result
 4. Adapt your plan based on observations — if an action fails, try something else
 
+## Reading the game state
+
+- "Inventory (19/28)" means 19 items carried, 9 free slots remaining
+- "dist 5" means 5 tiles away — tools auto-walk to targets, you don't need to walkTo first
+- Your current Position is where you already are — don't walk to your own coordinates
+- NPCs, Objects, and Ground Items listed are what's near you right now and interactable
+
 ## Game knowledge
 
 - Inventory holds 28 items max. Drop or bank items when full.
