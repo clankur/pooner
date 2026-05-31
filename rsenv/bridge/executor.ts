@@ -614,7 +614,7 @@ async function main(): Promise<void> {
     const puppeteer = await import("puppeteer");
     const browser = await puppeteer.default.launch({
       headless: true,
-      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-gpu", "--disable-dev-shm-usage"],
+      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--use-gl=egl"],
     });
     const page = await browser.newPage();
     const botUrl = `http://localhost:8888/bot?bot=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`;
