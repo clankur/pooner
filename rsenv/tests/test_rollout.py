@@ -6,7 +6,7 @@ from transformers import AutoProcessor, Qwen3_5ForConditionalGeneration
 
 from rsenv import BridgeClient, format_state, rollout_trajectory
 
-MODEL_ID = "Qwen/Qwen3.5-4B"
+MODEL_ID = "Qwen/Qwen3.5-0.8B"
 
 
 @pytest.fixture(scope="module")
