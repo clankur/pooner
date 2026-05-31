@@ -11,6 +11,7 @@ import logging
 import random
 from pathlib import Path
 from typing import TYPE_CHECKING
+from xml.etree.ElementTree import Element, SubElement, tostring
 
 import torch
 from pydantic import BaseModel
@@ -33,21 +34,42 @@ def load_system_prompt() -> str:
     return SYSTEM_PROMPT_PATH.read_text().strip()
 
 
+def _add_options(parent: Element, options: list[str]) -> None:
+    for opt in options:
+        el = SubElement(parent, "option")
+        el.text = opt
+
+
+def _indent(elem: Element, level: int = 0) -> None:
+    """In-place pretty-print indent (stdlib indent requires Python 3.9+)."""
+    indent = "\n" + "  " * level
+    if len(elem):
+        if not elem.text or not elem.text.strip():
+            elem.text = indent + "  "
+        for i, child in enumerate(elem):
+            _indent(child, level + 1)
+            if i < len(elem) - 1:
+                child.tail = indent + "  "
+            else:
+                child.tail = indent
+    if not elem.tail or not elem.tail.strip():
+        elem.tail = "\n" if level == 0 else ""
+
+
 def format_state(state: GameState) -> str:
     """Render game state as XML for the LLM."""
     pos = state.world_position if state.world_position != (0, 0) else state.position
-
-    lines: list[str] = ["<game_state>"]
+    root = Element("game_state")
 
     if state.tick > 0:
-        lines.append(f'<tick>{state.tick}</tick>')
-    lines.append(f'<position x="{pos[0]}" z="{pos[1]}"/>')
-    lines.append(f'<hp current="{state.hp}" max="{state.max_hp}"/>')
+        SubElement(root, "tick").text = str(state.tick)
+    SubElement(root, "position", x=str(pos[0]), z=str(pos[1]))
+    SubElement(root, "hp", current=str(state.hp), max=str(state.max_hp))
     if state.in_combat:
-        lines.append('<status>IN COMBAT</status>')
+        SubElement(root, "status").text = "IN COMBAT"
 
     # Skills
-    lines.append("<skills>")
+    skills_el = SubElement(root, "skills")
     has_skills = False
     for s in ALL_SKILLS:
         xp = state.skills.get(s, 0)
@@ -55,96 +77,80 @@ def format_state(state: GameState) -> str:
         if lvl > 1:
             has_skills = True
             xp_next = XP_FOR_LEVEL[lvl + 1] - xp if lvl < 99 else 0
-            lines.append(f'<skill name="{s}" level="{lvl}" xp_to_next="{xp_next}"/>')
+            SubElement(skills_el, "skill", name=s, level=str(lvl), xp_to_next=str(xp_next))
     if not has_skills:
-        lines.append('<skill name="all" level="1"/>')
-    lines.append("</skills>")
+        SubElement(skills_el, "skill", name="all", level="1")
 
     # Equipment
     if state.equipment:
         equip_items = [e for e in state.equipment if e.name]
         if equip_items:
-            lines.append("<equipment>")
+            equip_el = SubElement(root, "equipment")
             for e in equip_items:
-                lines.append(f'<item name="{e.name}"/>')
-            lines.append("</equipment>")
+                SubElement(equip_el, "item", name=e.name)
 
     # Inventory
-    lines.append(f'<inventory used="{state.inventory_count()}" capacity="28">')
+    inv_el = SubElement(root, "inventory", used=str(state.inventory_count()), capacity="28")
     if state.inventory_slots:
         for s in state.inventory_slots:
+            attrs = {"name": s.name}
             if s.count > 1:
-                lines.append(f'<item name="{s.name}" count="{s.count}"/>')
-            else:
-                lines.append(f'<item name="{s.name}"/>')
+                attrs["count"] = str(s.count)
+            SubElement(inv_el, "item", **attrs)
     elif state.inventory:
         for item, qty in state.inventory.items():
+            attrs = {"name": item}
             if qty > 1:
-                lines.append(f'<item name="{item}" count="{qty}"/>')
-            else:
-                lines.append(f'<item name="{item}"/>')
-    lines.append("</inventory>")
+                attrs["count"] = str(qty)
+            SubElement(inv_el, "item", **attrs)
 
     # Nearby NPCs
     npcs = state.nearby_npcs[:8]
     if npcs:
-        lines.append("<npcs>")
+        npcs_el = SubElement(root, "npcs")
         for npc in npcs:
-            attrs = f'name="{npc.name}" distance="{npc.distance}"'
+            attrs: dict[str, str] = {"name": npc.name, "distance": str(npc.distance)}
             if npc.combat_level > 0:
-                attrs += f' combat_level="{npc.combat_level}"'
+                attrs["combat_level"] = str(npc.combat_level)
             if npc.max_hp > 0 and npc.hp < npc.max_hp:
-                attrs += f' hp="{npc.hp}" max_hp="{npc.max_hp}"'
+                attrs["hp"] = str(npc.hp)
+                attrs["max_hp"] = str(npc.max_hp)
             if npc.in_combat:
-                attrs += ' in_combat="true"'
-            if npc.options:
-                lines.append(f"<npc {attrs}>")
-                for opt in npc.options:
-                    lines.append(f"  <option>{opt}</option>")
-                lines.append("</npc>")
-            else:
-                lines.append(f"<npc {attrs}/>")
-        lines.append("</npcs>")
+                attrs["in_combat"] = "true"
+            npc_el = SubElement(npcs_el, "npc", **attrs)
+            _add_options(npc_el, npc.options)
 
     # Nearby objects/locs
     locs = state.nearby_locs[:8]
     if locs:
-        lines.append("<objects>")
+        objs_el = SubElement(root, "objects")
         for loc in locs:
-            attrs = f'name="{loc.name}" distance="{loc.distance}"'
+            attrs = {"name": loc.name, "distance": str(loc.distance)}
             if "Open" in loc.options:
-                attrs += ' state="closed"'
+                attrs["state"] = "closed"
             elif "Close" in loc.options:
-                attrs += ' state="open"'
-            if loc.options:
-                lines.append(f"<object {attrs}>")
-                for opt in loc.options:
-                    lines.append(f"  <option>{opt}</option>")
-                lines.append("</object>")
-            else:
-                lines.append(f"<object {attrs}/>")
-        lines.append("</objects>")
+                attrs["state"] = "open"
+            loc_el = SubElement(objs_el, "object", **attrs)
+            _add_options(loc_el, loc.options)
 
     # Ground items
     ground = state.ground_items[:6]
     if ground:
-        lines.append("<ground_items>")
+        ground_el = SubElement(root, "ground_items")
         for gi in ground:
-            attrs = f'name="{gi.name}" distance="{gi.distance}"'
+            attrs = {"name": gi.name, "distance": str(gi.distance)}
             if gi.count > 1:
-                attrs += f' count="{gi.count}"'
-            lines.append(f"<item {attrs}/>")
-        lines.append("</ground_items>")
+                attrs["count"] = str(gi.count)
+            SubElement(ground_el, "item", **attrs)
 
     # Fallback for simple nearby list
     if not npcs and not locs and not ground and state.nearby:
-        lines.append("<nearby>")
+        nearby_el = SubElement(root, "nearby")
         for name in state.nearby:
-            lines.append(f'<entity name="{name}"/>')
-        lines.append("</nearby>")
+            SubElement(nearby_el, "entity", name=name)
 
-    lines.append("</game_state>")
-    return "\n".join(lines)
+    _indent(root)
+    return tostring(root, encoding="unicode")
 
 
 def build_messages(state: GameState) -> list[dict]:
