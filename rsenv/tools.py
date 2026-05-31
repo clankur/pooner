@@ -11,7 +11,7 @@ from enum import Enum
 
 from pydantic import BaseModel, Field
 
-from rsenv.tool_parser import extract_tool_call
+from rsenv.tool_parser import extract_tool_call, extract_tool_calls
 
 # ─── Tool argument models ─────────────────────────────────────────────────
 
@@ -255,23 +255,31 @@ TOOL_SCHEMAS: list[dict] = to_chat_schemas()
 logger = logging.getLogger(__name__)
 
 
-def parse_tool_call(text: str) -> tuple[str, BaseModel] | None:
-    """Parse a tool call from model output and validate against known tool schemas."""
-    result = extract_tool_call(text)
-    if result is None:
-        return None
-
-    name, raw_args = result
-
+def _validate(name: str, raw_args: dict) -> tuple[str, BaseModel] | None:
     model_cls = TOOL_MODELS.get(name)
     if model_cls is None:
         logger.info("Unknown tool name: %s", name)
         return None
-
     try:
-        validated_args = model_cls.model_validate(raw_args)
+        return name, model_cls.model_validate(raw_args)
     except Exception as e:
         logger.info("Tool args validation failed for %s: %s", name, e)
         return None
 
-    return name, validated_args
+
+def parse_tool_call(text: str) -> tuple[str, BaseModel] | None:
+    """Parse the first tool call from model output and validate against known tool schemas."""
+    result = extract_tool_call(text)
+    if result is None:
+        return None
+    return _validate(*result)
+
+
+def parse_tool_calls(text: str) -> list[tuple[str, BaseModel]]:
+    """Parse all tool calls from model output and validate against known tool schemas."""
+    results: list[tuple[str, BaseModel]] = []
+    for name, raw_args in extract_tool_calls(text):
+        validated = _validate(name, raw_args)
+        if validated is not None:
+            results.append(validated)
+    return results

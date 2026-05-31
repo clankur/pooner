@@ -38,13 +38,9 @@ def _parse_xml_function_call(function_call_str: str) -> tuple[str, dict] | None:
     return function_name, param_dict
 
 
-def extract_tool_call(text: str) -> tuple[str, dict] | None:
-    """Extract (name, arguments) from model output, or None if no tool call found."""
-    m = _TOOL_CALL_RE.search(text)
-    if not m:
-        return None
-
-    raw = m.group(1).strip()
+def _parse_one(raw: str) -> tuple[str, dict] | None:
+    """Parse a single <tool_call> body as JSON or XML."""
+    raw = raw.strip()
 
     # JSON format (Qwen3)
     try:
@@ -60,3 +56,19 @@ def extract_tool_call(text: str) -> tuple[str, dict] | None:
         return _parse_xml_function_call(fm.group(1))
 
     return None
+
+
+def extract_tool_calls(text: str) -> list[tuple[str, dict]]:
+    """Extract all (name, arguments) pairs from model output."""
+    results: list[tuple[str, dict]] = []
+    for m in _TOOL_CALL_RE.finditer(text):
+        parsed = _parse_one(m.group(1))
+        if parsed is not None:
+            results.append(parsed)
+    return results
+
+
+def extract_tool_call(text: str) -> tuple[str, dict] | None:
+    """Extract the first (name, arguments) from model output, or None."""
+    calls = extract_tool_calls(text)
+    return calls[0] if calls else None

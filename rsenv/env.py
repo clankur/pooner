@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
 from rsenv.client import RSClient
 from rsenv.state import ALL_SKILLS, XP_FOR_LEVEL, GameState, Trajectory, xp_to_level
-from rsenv.tools import ACTION_PREREQUISITES, TOOL_SCHEMAS, parse_tool_call
+from rsenv.tools import ACTION_PREREQUISITES, TOOL_SCHEMAS, parse_tool_calls
 
 logger = logging.getLogger(__name__)
 
@@ -337,12 +337,9 @@ def rollout_trajectory(
         all_token_ids.extend(new_ids.tolist())
         gen_mask.extend([1] * len(new_ids))
 
-        parsed = parse_tool_call(new_text)
-        if parsed is None:
+        calls = parse_tool_calls(new_text)
+        if not calls:
             break
-
-        action_name, action_args = parsed
-        num_actions += 1
 
         think_text = ""
         think_start = new_text.find("<think>")
@@ -350,16 +347,18 @@ def rollout_trajectory(
         if think_start != -1 and think_end != -1:
             think_text = new_text[think_start + len("<think>") : think_end].strip()
 
-        result = client.execute_action(action_name, action_args)
-        state = client.get_state()
+        for action_name, action_args in calls:
+            num_actions += 1
+            result = client.execute_action(action_name, action_args)
+            state = client.get_state()
 
-        if result.valid:
-            num_valid += 1
+            if result.valid:
+                num_valid += 1
 
-        obs_content = result.observation
+            append_tool_call(messages, action_name, action_args, think_text)
+            append_tool_response(messages, result.observation)
+            think_text = ""
 
-        append_tool_call(messages, action_name, action_args, think_text)
-        append_tool_response(messages, obs_content)
         full_inputs = processor.apply_chat_template(
             messages,
             tools=TOOL_SCHEMAS,
