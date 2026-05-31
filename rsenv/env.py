@@ -7,7 +7,6 @@ state.py (data), tools.py (actions), and client.py (execution).
 
 from __future__ import annotations
 
-import base64
 import logging
 import random
 from pathlib import Path
@@ -148,16 +147,7 @@ def build_messages(state: GameState) -> list[dict]:
     system_msg = {"role": "system", "content": load_system_prompt()}
     state_text = format_state(state)
 
-    if state.screenshot:
-        b64 = base64.b64encode(state.screenshot).decode()
-        user_content = [
-            {"type": "image", "image": f"data:image/png;base64,{b64}"},
-            {"type": "text", "text": state_text},
-        ]
-    else:
-        user_content = state_text
-
-    return [system_msg, {"role": "user", "content": user_content}]
+    return [system_msg, {"role": "user", "content": state_text}]
 
 
 def append_tool_call(messages: list[dict], name: str, args: BaseModel, think_text: str = "") -> None:

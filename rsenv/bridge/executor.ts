@@ -28,7 +28,6 @@ interface Command {
   type: "getState" | "action" | "reset";
   name?: string;
   arguments?: Record<string, unknown>;
-  includeScreenshot?: boolean;
 }
 
 interface StateResponse {
@@ -77,7 +76,6 @@ interface StateResponse {
     hp: number;
     maxHp: number;
     inCombat: boolean;
-    screenshot?: string;
   };
 }
 
@@ -107,15 +105,6 @@ function log(msg: string): void {
 
 function send(response: Response): void {
   process.stdout.write(JSON.stringify(response) + "\n");
-}
-
-async function attachScreenshot(sdk: BotSDK, response: StateResponse): Promise<void> {
-  try {
-    const dataUrl = await sdk.sendScreenshot(5000);
-    response.data.screenshot = dataUrl;
-  } catch {
-    log("Screenshot capture failed, continuing without it");
-  }
 }
 
 function formatState(state: BotWorldState): StateResponse {
@@ -661,12 +650,10 @@ async function main(): Promise<void> {
   await bot.skipTutorial();
   log("Tutorial check complete");
 
-  // Signal readiness by sending initial state (with screenshot for multimodal training)
+  // Signal readiness by sending initial state
   const initialState = sdk.getState();
   if (initialState?.inGame) {
-    const response = formatState(initialState);
-    await attachScreenshot(sdk, response);
-    send(response);
+    send(formatState(initialState));
   } else {
     send({ type: "error", message: "Bot not in game after 60s wait" });
   }
@@ -703,11 +690,7 @@ async function main(): Promise<void> {
       if (cmd.type === "getState") {
         const state = sdk.getState();
         if (state) {
-          const response = formatState(state);
-          if (cmd.includeScreenshot) {
-            await attachScreenshot(sdk, response);
-          }
-          send(response);
+          send(formatState(state));
         } else {
           send({ type: "error", message: "No game state available" });
         }

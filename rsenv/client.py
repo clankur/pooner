@@ -5,7 +5,6 @@ Two implementations:
   - BridgeClient: live execution via bridge/executor.ts subprocess
 """
 
-import base64
 import json
 import logging
 import subprocess
@@ -245,8 +244,8 @@ class BridgeClient(RSClient):
                 self._process.kill()
             self._process = None
 
-    def get_state(self, include_screenshot: bool = False) -> GameState:
-        self._send_command({"type": "getState", "includeScreenshot": include_screenshot})
+    def get_state(self) -> GameState:
+        self._send_command({"type": "getState"})
         response = self._read_response()
         if response and response.get("type") == "state":
             self._state = self._parse_state(response)
@@ -271,7 +270,7 @@ class BridgeClient(RSClient):
         )
 
     def reset(self, initial_state: GameState | None = None) -> GameState:
-        return self.get_state(include_screenshot=True)
+        return self.get_state()
 
     @property
     def is_running(self) -> bool:
@@ -378,14 +377,6 @@ class BridgeClient(RSClient):
 
         nearby_simple = [n.name for n in nearby_npcs] + [loc.name for loc in nearby_locs]
 
-        screenshot_data: bytes | None = None
-        screenshot_raw = data.get("screenshot")
-        if screenshot_raw and isinstance(screenshot_raw, str):
-            # Strip data URL prefix if present: "data:image/png;base64,..."
-            if screenshot_raw.startswith("data:"):
-                screenshot_raw = screenshot_raw.split(",", 1)[1]
-            screenshot_data = base64.b64decode(screenshot_raw)
-
         return GameState(
             tick=data.get("tick", 0),
             position=(pos.get("x", 0), pos.get("z", 0)),
@@ -404,5 +395,4 @@ class BridgeClient(RSClient):
             max_hp=data.get("maxHp", 10),
             in_combat=data.get("inCombat", False),
             in_game=data.get("inGame", False),
-            screenshot=screenshot_data,
         )
