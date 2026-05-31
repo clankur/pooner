@@ -11,7 +11,7 @@ import logging
 import random
 from pathlib import Path
 from typing import TYPE_CHECKING
-from xml.etree.ElementTree import Element, SubElement, tostring
+from xml.etree.ElementTree import Element, SubElement, indent, tostring
 
 import torch
 from pydantic import BaseModel
@@ -32,28 +32,6 @@ SYSTEM_PROMPT_PATH = Path(__file__).parent / "prompts" / "system.md"
 
 def load_system_prompt() -> str:
     return SYSTEM_PROMPT_PATH.read_text().strip()
-
-
-def _add_options(parent: Element, options: list[str]) -> None:
-    for opt in options:
-        el = SubElement(parent, "option")
-        el.text = opt
-
-
-def _indent(elem: Element, level: int = 0) -> None:
-    """In-place pretty-print indent (stdlib indent requires Python 3.9+)."""
-    indent = "\n" + "  " * level
-    if len(elem):
-        if not elem.text or not elem.text.strip():
-            elem.text = indent + "  "
-        for i, child in enumerate(elem):
-            _indent(child, level + 1)
-            if i < len(elem) - 1:
-                child.tail = indent + "  "
-            else:
-                child.tail = indent
-    if not elem.tail or not elem.tail.strip():
-        elem.tail = "\n" if level == 0 else ""
 
 
 def format_state(state: GameState) -> str:
@@ -118,7 +96,8 @@ def format_state(state: GameState) -> str:
             if npc.in_combat:
                 attrs["in_combat"] = "true"
             npc_el = SubElement(npcs_el, "npc", **attrs)
-            _add_options(npc_el, npc.options)
+            for opt in npc.options:
+                SubElement(npc_el, "option").text = opt
 
     # Nearby objects/locs
     locs = state.nearby_locs[:8]
@@ -131,7 +110,8 @@ def format_state(state: GameState) -> str:
             elif "Close" in loc.options:
                 attrs["state"] = "open"
             loc_el = SubElement(objs_el, "object", **attrs)
-            _add_options(loc_el, loc.options)
+            for opt in loc.options:
+                SubElement(loc_el, "option").text = opt
 
     # Ground items
     ground = state.ground_items[:6]
@@ -149,7 +129,7 @@ def format_state(state: GameState) -> str:
         for name in state.nearby:
             SubElement(nearby_el, "entity", name=name)
 
-    _indent(root)
+    indent(root)
     return tostring(root, encoding="unicode")
 
 
