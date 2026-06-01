@@ -29,4 +29,3 @@ The game state is provided as XML. Key elements:
 - Rocks: Copper/Tin (Mining 1, 17.5xp), Iron (Mining 15, 35xp)
 - Combat: Attack NPCs for Attack/Strength/Defence/Hitpoints XP. Eat food to heal.
 - A Knife is a specific item — daggers, swords, and other weapons cannot substitute for it.
-- You start in Lumbridge. The bank is north in the castle.
