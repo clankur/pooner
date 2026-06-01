@@ -206,16 +206,16 @@ def load_prompt_bank(seed: int = 42) -> list[GameState]:
     return bank
 
 
-# Vetted spawn locations around Lumbridge — each is a walkable tile near useful resources.
+# Vetted spawn locations — pulled from learnings/walking.md, combat.md, fishing.md, etc.
 SPAWN_LOCATIONS: list[tuple[int, int]] = [
-    (3222, 3218),  # Lumbridge castle courtyard (default)
-    (3200, 3209),  # West of Lumbridge, near trees
-    (3230, 3237),  # North Lumbridge, near goblins
-    (3182, 3184),  # Lumbridge swamp mine (copper/tin)
-    (3152, 3206),  # Draynor Village bank area
-    (3254, 3179),  # Al Kharid mine area
-    (3243, 3244),  # Lumbridge cow field
-    (3103, 3230),  # Barbarian Village fishing spot
+    (3222, 3218),  # Lumbridge castle courtyard
+    (3200, 3220),  # Lumbridge trees (woodcutting.md)
+    (3240, 3220),  # Lumbridge goblins (combat.md)
+    (3253, 3290),  # Lumbridge cow field center (combat.md)
+    (3237, 3295),  # Lumbridge chickens (combat.md)
+    (3087, 3230),  # Draynor fishing (fishing.md)
+    (3285, 3365),  # SE Varrock mine (mining.md)
+    (3212, 3247),  # Lumbridge general store (walking.md)
 ]
 
 # Starter tool kits — each is (inventory_dict, relevant_skills_to_randomize)
