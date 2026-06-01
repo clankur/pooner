@@ -1,0 +1,58 @@
+[
+  {
+    "objectID": "index.html",
+    "href": "index.html",
+    "title": "RL experiment reports",
+    "section": "",
+    "text": "Experiment reports from pooner, a GRPO training codebase for teaching a small LLM to play RuneScape.\n\n\n\nReport\nSummary\n\n\n\n\nLLMs yearn for the mines\nExp 161: mode collapse in one gradient step — no KL, high LR, group_size=2"
+  },
+  {
+    "objectID": "exp161.html",
+    "href": "exp161.html",
+    "title": "LLMs yearn for the mines",
+    "section": "",
+    "text": "Step 0: the model earns 956 XP chopping trees and fighting giant rats on a live RuneScape server. Step 1: it repeats \"Let me mine the rock.\\n&lt;/think&gt;\\n\" 150 times until it hits the 2048 token limit. Qwen started yearning for the mines, and then the mines were its undoing."
+  },
+  {
+    "objectID": "exp161.html#tldr",
+    "href": "exp161.html#tldr",
+    "title": "LLMs yearn for the mines",
+    "section": "",
+    "text": "Step 0: the model earns 956 XP chopping trees and fighting giant rats on a live RuneScape server. Step 1: it repeats \"Let me mine the rock.\\n&lt;/think&gt;\\n\" 150 times until it hits the 2048 token limit. Qwen started yearning for the mines, and then the mines were its undoing."
+  },
+  {
+    "objectID": "exp161.html#the-setup",
+    "href": "exp161.html#the-setup",
+    "title": "LLMs yearn for the mines",
+    "section": "the setup",
+    "text": "the setup\nQwen3.5-0.8B with zero post-training was already surprisingly good at playing RuneScape via tool calls — good enough that I got impatient and kicked off a live GRPO training run before thinking too hard about hyperparameters. The model could analyze game state, count inventory slots, and pick reasonable actions out of the box. I wanted to see what happened when I reinforced that with real XP rewards on the LostCity server.\nThe rs-sdk runs multiplied XP rates to speed up training, so the model levels fast even in short rollouts.\nThe config:\nmodel:\n  model_name_or_path: Qwen/Qwen3.5-0.8B\n  quantize_int4: false\n  max_new_tokens: 2048\ngrpo:\n1  group_size: 2\n2  kl_coeff: 0.0\n3  learning_rate: 3e-5\nenv:\n  max_actions: 5\n  use_heuristic_reward: false\n\n1\n\nOverrode from 4 to 2 on the command line — each rollout takes ~100s on the live server\n\n2\n\nSkipped loading the reference model to save VRAM on the 4090\n\n3\n\n3x the base config’s LR. No warmup, no decay."
+  },
+  {
+    "objectID": "exp161.html#the-fall",
+    "href": "exp161.html#the-fall",
+    "title": "LLMs yearn for the mines",
+    "section": "the fall",
+    "text": "the fall\n\n\n                            \n                                            \n\n\nThat’s not a gradual decline. That’s a phase transition. One gradient update — computed from 2 rollouts with 2 update epochs — and the model forgot how to form sentences.\nLoss and KL both flatline at zero from step 2 onward — every rollout scores the same -1.0, advantages are all zero, gradients are zero. The model is frozen in its collapsed state with no learning signal to escape.\nCancelled after step 7. 22 minutes of GPU time. The model spent 18 of those generating variations of “Let me do that.”"
+  },
+  {
+    "objectID": "exp161.html#the-logs",
+    "href": "exp161.html#the-logs",
+    "title": "LLMs yearn for the mines",
+    "section": "the logs",
+    "text": "the logs\nThe raw generation logs are the real story here. This is a 0.8B model going from competent agentic reasoning to broken record in a single gradient step.\n\nstep 0 — peak performance\nRollout 1 — the model analyzes state, counts 6 free inventory slots, notes the nearest tree, and starts issuing tool calls. I only log action failures, so here’s what I know:\n[rsenv.tools] chopTree('Oak')      → FAIL enum wants 'Oak tree'\n[rsenv.tools] mineRock('Swamp tar') → FAIL not a rock\n[rsenv.tools] chopTree('Oak')      → FAIL same enum issue\n              ... remaining actions not logged (success path is silent) ...\n[Step    0]   reward=10.27 xp=956.0 actions=7.5/5.0\n\n1\n\nClose — the model saw “Oak” in the game state and passed it verbatim, but the enum wants “Oak tree”.\n\n2\n\nSwamp tar is not a rock, but the model yearns for the mines.\n\n3\n\nMean across 2 rollouts. The successful actions aren’t logged, but I can see exactly what they did from rollout 2’s game state — the bot leveled up between rollouts:\n\n\nRollout 1 start → Rollout 2 start:\n  Attack:      3 → 7\n  Hitpoints:  10 → 11\n  Woodcutting: 22 → 25\n  HP:         10/10 → 9/11\nTook damage in combat, leveled up three skills. It was actually playing the game.\nThis is a base model with zero post-training doing agentic planning on a live game server. It’s why I got excited and shipped the training run without thinking about stability.\nThen the gradient update happens.\n\n\nstep 1 — the wheels come off\nRollout 1 — the model can still form sentences but its concepts of mining and combat have fused together:\n'Let me analyze this game state. The player is at World X=3189,\nhp=10, max=11, so they are at health=1, no health need.\n\nLet me:\n1 Attack the Giant rats\n2 Mine the Giant rat at distance 8\n3 Mine the Giant rat at distance 8\n4 Mine the Giant rat at distance 10\n5 Mine the Giant rat at distance 10\n6 Mine the Giant rat at distance 8 (second batch)\n6 Mine the Giant rat at distance 10 (second batch)\n6 Mine the Giant rat at distance 8 (third batch)\n...'\n\n1\n\nhp=10, max=11 → health=1. Math is hard when your weights just got yoinked.\n\n2\n\n“Mine the Giant rat.” Mining and combat are one concept now.\n\n3\n\nStep counter stuck at 6 — already looping.\n\n\nRollout 2 — tries to mine a swamp tar. This is the last parseable tool call the model will ever produce:\n'  I need to mine the Swamp tar at distance 14\n\nLet me do that.\n&lt;/think&gt;\n\nLet me mine the Swamp tar at distance 14.\n\n&lt;tool_call&gt;\n&lt;function=mineRock&gt;\n&lt;parameter&gt;rock_type&gt;\nSwamp tar\n&lt;/parameter&gt;\n&lt;/function&gt;\n&lt;/tool_call&gt;&lt;|im_end|&gt;'\n\n1\n\nSwamp tar is not a rock.\n\n2\n\nPydantic rejects this. But at least the model still knows what a tool call looks like. Enjoy it while it lasts.\n\n\n\n\nstep 2 — let me mine the rock\n2048 tokens. No tool call. Both rollouts produce the same thing:\n'Let me mine the rock.Let me do that.\n&lt;/think&gt;\n\nLet me mine the rock.\n&lt;/think&gt;\n\nLet me mine the rock.\n&lt;/think&gt;\n\nLet me mine the rock.\n&lt;/think&gt;\n\n...'  (×150, 2048 tokens total)\n\n1\n\nOpens with the fused phrase — no newline between thoughts.\n\n2\n\nThis block repeats 150 times. 2.5 minutes of 4090 time per rollout, twice. Reward: -1.0.\n\n\n\n\nsteps 3–7 — continued decay\nIt only gets worse. The repetition unit gets shorter each step as the model’s vocabulary collapses:\n\n\n\n\n\n\n\n\nStep\nOutput\n\n\n\n\n\n3\nLet meThis game state state.\nWord boundaries dissolving\n\n\n5\nLet mehelp memine the rock.\n\"memine\" — four fragments fused into one\n\n\n6\nLet me\\n&lt;/think&gt;\\n ×200\nAll semantic content gone\n\n\n7\nHP statestatestatestatestate\nIt remembers game states have HP. That’s all it remembers.\n\n\n\nI pulled the plug after step 7.\n\n\n                            \n                                            \n\n\nAfter the first gradient step, every generated token is wasted."
+  },
+  {
+    "objectID": "exp161.html#what-went-wrong",
+    "href": "exp161.html#what-went-wrong",
+    "title": "LLMs yearn for the mines",
+    "section": "what went wrong",
+    "text": "what went wrong\nThe unquantized 0.8B model + 2048-token sequences + optimizer states put me near 24GB on the 4090. The reference model for KL adds ~1.6GB. I cut corners to avoid OOMs — corners that removed every guardrail against mode collapse.\nThree contributing factors:\n\n\n\n\n\n\n\n\nFactor\nSetting\nEffect\n\n\n\n\nNo KL penalty\nkl_coeff=0.0\nNo anchor to pretrained distribution. The clipped surrogate alone cannot prevent arbitrarily large policy drift in a single update.\n\n\nNo LR schedule\nlr=3e-5, flat\n3× the base config (1e-5). No warmup attenuates the first gradient; no decay reduces later ones.\n\n\ngroup_size=2\nOverridden from 4\nAdvantage estimate is binary: one rollout gets +1, the other -1. No signal about magnitude."
+  },
+  {
+    "objectID": "exp161.html#next-run",
+    "href": "exp161.html#next-run",
+    "title": "LLMs yearn for the mines",
+    "section": "next run",
+    "text": "next run\n\n\n\n\n\n\n\n\nParameter\nThis run\nNext run\n\n\n\n\nkl_coeff\n0.0\n0.01–0.05\n\n\nlearning_rate\n3e-5 (flat)\n1e-5 + warmup + cosine decay\n\n\ngroup_size\n2\n4–8\n\n\nQuantization\nnone\neverything — weights, activations, backward pass. Free enough VRAM to actually run KL + group_size=4.\n\n\nPost-training\nnone (base model)\nSFT on successful trajectories before GRPO\n\n\nAccelerator\n4090 (24GB)\ntaking offers :)"
+  }
+]
