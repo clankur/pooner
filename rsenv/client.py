@@ -67,7 +67,7 @@ class SimClient(RSClient):
         all_held = inv_names | equip_names
 
         if name in ("chopTree", "chopOak"):
-            has_axe = any("axe" in n.lower() for n in all_held)
+            has_axe = any("axe" in item_name.lower() for item_name in all_held)
             if not has_axe:
                 return ActionResult(
                     observation=f"Cannot {name}: no axe equipped or in inventory. | Requires: Axe equipped or in inventory",
@@ -76,7 +76,7 @@ class SimClient(RSClient):
                 )
 
         if name in ("mineRock", "mineIron"):
-            has_pick = any("pickaxe" in n.lower() for n in all_held)
+            has_pick = any("pickaxe" in item_name.lower() for item_name in all_held)
             if not has_pick:
                 return ActionResult(
                     observation=f"Cannot {name}: no pickaxe equipped or in inventory. | Requires: Pickaxe equipped or in inventory",
@@ -85,8 +85,8 @@ class SimClient(RSClient):
                 )
 
         if name == "fletchLogs":
-            has_knife = any("knife" in n.lower() for n in all_held)
-            has_logs = any("log" in n.lower() for n in inv_names)
+            has_knife = any("knife" in item_name.lower() for item_name in all_held)
+            has_logs = any("log" in item_name.lower() for item_name in inv_names)
             if not has_knife:
                 return ActionResult(
                     observation="Cannot fletch: no Knife in inventory (daggers/swords do not work). | Requires: Knife in inventory, Logs in inventory",
