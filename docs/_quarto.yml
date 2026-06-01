@@ -8,6 +8,10 @@ website:
     left:
       - text: "Home"
         href: index.qmd
+      - text: "Reports"
+        menu:
+          - text: "LLMs yearn for the mines"
+            href: exp161.qmd
 
 format:
   html:

@@ -1,0 +1,301 @@
+---
+title: "LLMs yearn for the mines"
+subtitle: "how one gradient update lobotomized my RuneScape bot"
+date: 2026-06-01
+categories: [training, failure, grpo]
+---
+
+```{python}
+#| echo: false
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+
+steps =    [0,     1,     2,     3,     4,     5,     6,     7]
+reward =   [10.27, -0.45, -1.00, -1.00, -1.00, -1.00, -1.00, -1.00]
+xp =       [956.0, 0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0]
+actions =  [7.5,   0.5,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0]
+valid =    [5.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0]
+loss =     [-0.0103, 0.0121, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+kl =       [-0.8983, -0.1844, -0.0014, -0.0035, -0.0043, -0.0055, -0.0034, -0.0160]
+elapsed =  [216.9, 320.4, 488.8, 657.1, 825.0, 993.6, 1162.4, 1330.6]
+
+colors = {
+    "reward": "#6ea8fe",
+    "xp": "#f0ad4e",
+    "actions": "#5cb85c",
+    "valid": "#d9534f",
+    "loss": "#c792ea",
+    "kl": "#ff7979",
+}
+```
+
+## tl;dr
+
+Step 0: the model earns 956 XP chopping trees and fighting giant rats on a live RuneScape server. Step 1: it repeats `"Let me mine the rock.\n</think>\n"` 150 times until it hits the 2048 token limit. Qwen started yearning for the mines, and then the mines were its undoing.
+
+## the setup
+
+Qwen3.5-0.8B with zero post-training was already surprisingly good at playing RuneScape via tool calls — good enough that I got impatient and kicked off a live GRPO training run before thinking too hard about hyperparameters. The model could analyze game state, count inventory slots, and pick reasonable actions out of the box. I wanted to see what happened when I reinforced that with real XP rewards on the LostCity server. 
+
+The rs-sdk runs multiplied XP rates to speed up training, so the model levels fast even in short rollouts.
+
+The config:
+
+```yaml
+model:
+  model_name_or_path: Qwen/Qwen3.5-0.8B
+  quantize_int4: false
+  max_new_tokens: 2048
+grpo:
+  group_size: 2        # <1>
+  kl_coeff: 0.0        # <2>
+  learning_rate: 3e-5   # <3>
+env:
+  max_actions: 5
+  use_heuristic_reward: false
+```
+
+1. Overrode from 4 to 2 on the command line — each rollout takes ~100s on the live server
+2. Skipped loading the reference model to save VRAM on the 4090
+3. 3x the base config's LR. No warmup, no decay.
+
+## the fall
+
+```{python}
+#| echo: false
+fig = make_subplots(
+    rows=2, cols=2,
+    subplot_titles=("Reward", "XP Gained", "Actions (total vs valid)", "Loss & KL"),
+    vertical_spacing=0.12,
+    horizontal_spacing=0.1,
+)
+
+fig.add_trace(go.Scatter(
+    x=steps, y=reward, mode="lines+markers", name="reward",
+    line=dict(color=colors["reward"], width=3),
+    marker=dict(size=8),
+), row=1, col=1)
+fig.add_hline(y=0, line_dash="dot", line_color="gray", opacity=0.5, row=1, col=1)
+
+fig.add_trace(go.Scatter(
+    x=steps, y=xp, mode="lines+markers", name="XP",
+    line=dict(color=colors["xp"], width=3),
+    marker=dict(size=8),
+), row=1, col=2)
+
+fig.add_trace(go.Scatter(
+    x=steps, y=actions, mode="lines+markers", name="actions",
+    line=dict(color=colors["actions"], width=3),
+    marker=dict(size=8),
+), row=2, col=1)
+fig.add_trace(go.Scatter(
+    x=steps, y=valid, mode="lines+markers", name="valid actions",
+    line=dict(color=colors["valid"], width=3),
+    marker=dict(size=8),
+), row=2, col=1)
+
+fig.add_trace(go.Scatter(
+    x=steps, y=loss, mode="lines+markers", name="loss",
+    line=dict(color=colors["loss"], width=3),
+    marker=dict(size=8),
+), row=2, col=2)
+fig.add_trace(go.Scatter(
+    x=steps, y=kl, mode="lines+markers", name="KL",
+    line=dict(color=colors["kl"], width=3),
+    marker=dict(size=8),
+), row=2, col=2)
+
+fig.update_layout(
+    template="plotly_dark",
+    paper_bgcolor="#1a1a2e",
+    plot_bgcolor="#16213e",
+    font=dict(color="#e0e0e0"),
+    height=600,
+    showlegend=True,
+    legend=dict(orientation="h", yanchor="bottom", y=-0.15, xanchor="center", x=0.5),
+    title=dict(text="speedrun to mode collapse", font=dict(size=16)),
+)
+for i in range(1, 3):
+    for j in range(1, 3):
+        fig.update_xaxes(title_text="step", row=i, col=j, gridcolor="#2a2a4a")
+        fig.update_yaxes(gridcolor="#2a2a4a", row=i, col=j)
+
+fig.show()
+```
+
+That's not a gradual decline. That's a phase transition. One gradient update — computed from 2 rollouts with 2 update epochs — and the model forgot how to form sentences.
+
+Loss and KL both flatline at zero from step 2 onward — every rollout scores the same -1.0, advantages are all zero, gradients are zero. The model is frozen in its collapsed state with no learning signal to escape.
+
+Cancelled after step 7. 22 minutes of GPU time. The model spent 18 of those generating variations of "Let me do that."
+
+## the logs
+
+The raw generation logs are the real story here. This is a 0.8B model going from competent agentic reasoning to broken record in a single gradient step.
+
+### step 0 — peak performance
+
+Rollout 1 — the model analyzes state, counts 6 free inventory slots, notes the nearest tree, and starts issuing tool calls. I only log action *failures*, so here's what I know:
+
+```
+[rsenv.tools] chopTree('Oak')      → FAIL enum wants 'Oak tree'  # <1>
+[rsenv.tools] mineRock('Swamp tar') → FAIL not a rock             # <2>
+[rsenv.tools] chopTree('Oak')      → FAIL same enum issue
+              ... remaining actions not logged (success path is silent) ...
+[Step    0]   reward=10.27 xp=956.0 actions=7.5/5.0               # <3>
+```
+
+1. Close — the model saw "Oak" in the game state and passed it verbatim, but the enum wants "Oak tree".
+2. Swamp tar is not a rock, but the model yearns for the mines.
+3. Mean across 2 rollouts. The successful actions aren't logged, but I can see exactly what they did from rollout 2's game state — the bot leveled up between rollouts:
+
+```
+Rollout 1 start → Rollout 2 start:
+  Attack:      3 → 7
+  Hitpoints:  10 → 11
+  Woodcutting: 22 → 25
+  HP:         10/10 → 9/11
+```
+
+Took damage in combat, leveled up three skills. It was actually *playing the game*.
+
+This is a base model with zero post-training doing agentic planning on a live game server. It's why I got excited and shipped the training run without thinking about stability.
+
+Then the gradient update happens.
+
+### step 1 — the wheels come off
+
+Rollout 1 — the model can still form sentences but its concepts of mining and combat have fused together:
+
+```
+'Let me analyze this game state. The player is at World X=3189,
+hp=10, max=11, so they are at health=1, no health need.          # <1>
+
+Let me:
+1 Attack the Giant rats
+2 Mine the Giant rat at distance 8                                # <2>
+3 Mine the Giant rat at distance 8
+4 Mine the Giant rat at distance 10
+5 Mine the Giant rat at distance 10
+6 Mine the Giant rat at distance 8 (second batch)                 # <3>
+6 Mine the Giant rat at distance 10 (second batch)
+6 Mine the Giant rat at distance 8 (third batch)
+...'
+```
+
+1. `hp=10, max=11` → `health=1`. Math is hard when your weights just got yoinked.
+2. "Mine the Giant rat." Mining and combat are one concept now.
+3. Step counter stuck at 6 — already looping.
+
+Rollout 2 — tries to mine a swamp tar. This is the last parseable tool call the model will ever produce:
+
+```
+'  I need to mine the Swamp tar at distance 14                     # <1>
+
+Let me do that.
+</think>
+
+Let me mine the Swamp tar at distance 14.
+
+<tool_call>
+<function=mineRock>
+<parameter>rock_type>
+Swamp tar                                                          # <2>
+</parameter>
+</function>
+</tool_call><|im_end|>'
+```
+
+1. Swamp tar is not a rock.
+2. Pydantic rejects this. But at least the model still knows what a tool call looks like. Enjoy it while it lasts.
+
+### step 2 — let me mine the rock
+
+2048 tokens. No tool call. Both rollouts produce the same thing:
+
+```
+'Let me mine the rock.Let me do that.                              # <1>
+</think>
+
+Let me mine the rock.
+</think>
+
+Let me mine the rock.
+</think>
+
+Let me mine the rock.                                              # <2>
+</think>
+
+...'  (×150, 2048 tokens total)
+```
+
+1. Opens with the fused phrase — no newline between thoughts.
+2. This block repeats 150 times. 2.5 minutes of 4090 time per rollout, twice. Reward: -1.0.
+
+### steps 3–7 — continued decay
+
+It only gets worse. The repetition unit gets shorter each step as the model's vocabulary collapses:
+
+| Step | Output | |
+|------|--------|-|
+| 3 | `Let meThis game state state.` | Word boundaries dissolving |
+| 5 | `Let mehelp memine the rock.` | `"memine"` — four fragments fused into one |
+| 6 | `Let me\n</think>\n` ×200 | All semantic content gone |
+| 7 | `HP statestatestatestatestate` | It remembers game states have HP. That's all it remembers. |
+
+I pulled the plug after step 7.
+
+```{python}
+#| echo: false
+gen_tokens = [548, 631, 2048, 2048, 2048, 2048, 2048, 2048, 2048, 2048, 2048, 2048, 2048, 2048, 2048, 2048]
+useful_tokens = [548, 631, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+rollout_labels = [f"s{i//2}r{i%2}" for i in range(len(gen_tokens))]
+
+fig2 = go.Figure()
+fig2.add_trace(go.Bar(
+    x=rollout_labels, y=gen_tokens, name="tokens generated",
+    marker_color="#6ea8fe", opacity=0.4,
+))
+fig2.add_trace(go.Bar(
+    x=rollout_labels, y=useful_tokens, name="useful tokens",
+    marker_color="#5cb85c",
+))
+fig2.update_layout(
+    template="plotly_dark",
+    paper_bgcolor="#1a1a2e",
+    plot_bgcolor="#16213e",
+    font=dict(color="#e0e0e0"),
+    height=350,
+    barmode="overlay",
+    title=dict(text="Tokens generated per rollout (useful vs wasted)", font=dict(size=14)),
+    xaxis_title="rollout (step / rollout index)",
+    yaxis_title="tokens",
+    legend=dict(orientation="h", yanchor="bottom", y=-0.25, xanchor="center", x=0.5),
+)
+fig2.show()
+```
+
+After the first gradient step, every generated token is wasted.
+
+## what went wrong
+
+The unquantized 0.8B model + 2048-token sequences + optimizer states put me near 24GB on the 4090. The reference model for KL adds ~1.6GB. I cut corners to avoid OOMs — corners that removed every guardrail against mode collapse.
+
+Three contributing factors:
+
+| Factor | Setting | Effect |
+|--------|---------|--------|
+| No KL penalty | `kl_coeff=0.0` | No anchor to pretrained distribution. The clipped surrogate alone cannot prevent arbitrarily large policy drift in a single update. |
+| No LR schedule | `lr=3e-5`, flat | 3× the base config (1e-5). No warmup attenuates the first gradient; no decay reduces later ones. |
+| `group_size=2` | Overridden from 4 | Advantage estimate is binary: one rollout gets +1, the other -1. No signal about magnitude. |
+
+## next run
+
+| Parameter | This run | Next run |
+|-----------|----------|----------|
+| `kl_coeff` | 0.0 | 0.01–0.05 |
+| `learning_rate` | 3e-5 (flat) | 1e-5 + warmup + cosine decay |
+| `group_size` | 2 | 4–8 |
+| Quantization | none | everything — weights, activations, backward pass. Free enough VRAM to actually run KL + group_size=4. |
+| Post-training | none (base model) | SFT on successful trajectories before GRPO |
+| Accelerator | 4090 (24GB) | taking offers :) |
