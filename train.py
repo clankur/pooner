@@ -274,6 +274,9 @@ class StepMetrics:
     group_mean_xp: float
     mean_actions: float
     mean_valid_actions: float
+    mean_level_ups: float
+    mean_tokens_per_action: float
+    idle_count: int
     policy_loss: float
     kl_loss: float
     total_loss: float
@@ -423,6 +426,7 @@ def train(config: Config) -> None:
 
         # ── 5. Log metrics ──
         rewards = torch.tensor(group.rewards)
+        total_actions_sum = sum(t.num_actions for t in trajectories)
         metrics = StepMetrics(
             step=step,
             group_mean_reward=rewards.mean().item(),
@@ -430,8 +434,13 @@ def train(config: Config) -> None:
             group_min_reward=rewards.min().item(),
             group_max_reward=rewards.max().item(),
             group_mean_xp=sum(t.total_xp for t in trajectories) / len(trajectories),
-            mean_actions=sum(t.num_actions for t in trajectories) / len(trajectories),
+            mean_actions=total_actions_sum / len(trajectories),
             mean_valid_actions=sum(t.num_valid_actions for t in trajectories) / len(trajectories),
+            mean_level_ups=sum(t.num_level_ups for t in trajectories) / len(trajectories),
+            mean_tokens_per_action=(
+                sum(t.total_gen_tokens for t in trajectories) / max(total_actions_sum, 1)
+            ),
+            idle_count=sum(1 for t in trajectories if t.total_xp == 0 and t.num_actions > 0),
             policy_loss=sum(epoch_policy) / len(epoch_policy),
             kl_loss=sum(epoch_kl) / len(epoch_kl),
             total_loss=sum(epoch_losses) / len(epoch_losses),
@@ -457,6 +466,9 @@ def train(config: Config) -> None:
                     "group_mean_xp": metrics.group_mean_xp,
                     "mean_actions": metrics.mean_actions,
                     "mean_valid_actions": metrics.mean_valid_actions,
+                    "mean_level_ups": metrics.mean_level_ups,
+                    "mean_tokens_per_action": metrics.mean_tokens_per_action,
+                    "idle_count": metrics.idle_count,
                     "policy_loss": metrics.policy_loss,
                     "kl_loss": metrics.kl_loss,
                     "total_loss": metrics.total_loss,

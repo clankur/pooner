@@ -205,6 +205,50 @@ def load_prompt_bank(seed: int = 42) -> list[GameState]:
     return bank
 
 
+# ─── Reward ───────────────────────────────────────────────────────────────
+
+
+def compute_reward(
+    total_xp_gained: int,
+    num_actions: int,
+    num_valid: int,
+    initial_skills: dict[str, int],
+    final_skills: dict[str, int],
+    initial_position: tuple[int, int],
+    final_position: tuple[int, int],
+    total_gen_tokens: int,
+) -> tuple[float, int]:
+    """Compute trajectory reward. Returns (reward, num_level_ups)."""
+    reward = 0.0
+
+    # 1. XP reward (primary signal)
+    reward += total_xp_gained / 100.0
+
+    # 2. Level-up bonus
+    num_level_ups = sum(
+        max(0, xp_to_level(final_skills[s]) - xp_to_level(initial_skills.get(s, 0)))
+        for s in final_skills
+    )
+    reward += 2.0 * num_level_ups
+
+    # 3. Invalid action penalty
+    reward -= 0.3 * (num_actions - num_valid)
+
+    # 4. Idle trajectory penalty
+    if total_xp_gained == 0 and initial_position == final_position and num_actions > 0:
+        reward -= 1.0
+
+    # 5. Token efficiency: reward sweet spot, penalize excess
+    if num_actions > 0:
+        tokens_per_action = total_gen_tokens / num_actions
+        if tokens_per_action <= 150:
+            reward += 0.1 * min(tokens_per_action, 100) / 100
+        else:
+            reward -= 0.3 * min((tokens_per_action - 150) / 500, 1.0)
+
+    return reward, num_level_ups
+
+
 # ─── Trajectory rollout ───────────────────────────────────────────────────
 
 
@@ -233,6 +277,8 @@ def rollout_trajectory(
 
     tokenizer = processor.tokenizer
     initial_xp = state.total_xp()
+    initial_skills = dict(state.skills)
+    initial_position = state.world_position
     messages = build_messages(state)
 
     inputs = processor.apply_chat_template(
@@ -258,6 +304,7 @@ def rollout_trajectory(
 
     num_actions = 0
     num_valid = 0
+    total_gen_tokens = 0
     _logged_first = False
 
     generate_kwargs: dict = {
@@ -279,6 +326,7 @@ def rollout_trajectory(
 
         new_ids = outputs.sequences[0, len(all_token_ids) :]
         new_text = tokenizer.decode(new_ids, skip_special_tokens=False)
+        total_gen_tokens += len(new_ids)
 
         if not _logged_first:
             logger.info("First generation (%d tokens): %s", len(new_ids), repr(new_text[:1000]))
@@ -303,6 +351,8 @@ def rollout_trajectory(
             think_text = new_text[think_start + len("<think>") : think_end].strip()
 
         for action_name, action_args in calls:
+            if num_actions >= max_actions:
+                break
             num_actions += 1
             result = client.execute_action(action_name, action_args)
             state = client.get_state()
@@ -313,6 +363,9 @@ def rollout_trajectory(
             append_tool_call(messages, action_name, action_args, think_text)
             append_tool_response(messages, result.observation)
             think_text = ""
+
+        if num_actions >= max_actions:
+            break
 
         full_inputs = processor.apply_chat_template(
             messages,
@@ -331,13 +384,16 @@ def rollout_trajectory(
 
     total_xp_gained = state.total_xp() - initial_xp
 
-    reward = 0.0
-    reward += total_xp_gained / 100.0
-    if num_actions > 0:
-        reward += 0.5 * (num_valid / num_actions)
-        reward += 0.1 * min(num_actions, max_actions)
-    else:
-        reward -= 1.0
+    reward, num_level_ups = compute_reward(
+        total_xp_gained=total_xp_gained,
+        num_actions=num_actions,
+        num_valid=num_valid,
+        initial_skills=initial_skills,
+        final_skills=state.skills,
+        initial_position=initial_position,
+        final_position=state.world_position,
+        total_gen_tokens=total_gen_tokens,
+    )
 
     return Trajectory(
         prompt_ids=torch.tensor(prompt_ids.tolist()[:prompt_len]),
@@ -348,5 +404,7 @@ def rollout_trajectory(
         total_xp=total_xp_gained,
         num_actions=num_actions,
         num_valid_actions=num_valid,
+        num_level_ups=num_level_ups,
+        total_gen_tokens=total_gen_tokens,
         final_state=state,
     )

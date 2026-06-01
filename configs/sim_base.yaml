@@ -5,7 +5,7 @@ defaults:
   - _self_
 
 model:
-  max_new_tokens: 4096
+  max_new_tokens: 1024
   temperature: 0.8
 
 grpo:
