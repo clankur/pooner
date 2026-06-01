@@ -1,0 +1,9 @@
+# Live game training with Qwen3.5-0.8B
+# uv run python -m train --config-name=gpu_4090_live_0.8b ++paths.model_name=live_0.8b_001
+defaults:
+  - live_base
+  - _self_
+
+model:
+  model_name_or_path: "Qwen/Qwen3.5-0.8B"
+  quantize_int4: false

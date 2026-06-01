@@ -1,7 +1,7 @@
 model:
   model_name_or_path: "Qwen/Qwen3.5-4B"
   quantize_int4: true
-  max_new_tokens: 4096
+  max_new_tokens: 8192
   temperature: 0.8
 
 grpo:

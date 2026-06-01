@@ -97,6 +97,8 @@ type Response = StateResponse | ActionResultResponse | ErrorResponse;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────
 
+const PATH_BLOCKED_HINT = " Path may be blocked — look for doors to open.";
+
 function log(msg: string): void {
   process.stderr.write(`[bridge] ${msg}\n`);
 }
@@ -279,6 +281,9 @@ async function executeAction(
         const result = await bot.walkTo(x, z);
         success = result.success;
         message = result.message;
+        if (!success) {
+          message += PATH_BLOCKED_HINT;
+        }
         break;
       }
 
@@ -498,6 +503,9 @@ async function executeAction(
         const result = await bot.pickupItem(new RegExp(itemName, "i"));
         success = result.success;
         message = result.message;
+        if (!success && !message.toLowerCase().includes("path") && !result.reason?.includes("not_found")) {
+          message += PATH_BLOCKED_HINT;
+        }
         reason = result.reason;
         break;
       }

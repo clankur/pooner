@@ -5,17 +5,23 @@ drives the plan-then-execute loop. Everything game-specific is in
 state.py (data), tools.py (actions), and client.py (execution).
 """
 
+from __future__ import annotations
+
 import logging
 import random
 from pathlib import Path
+from typing import TYPE_CHECKING
+from xml.etree.ElementTree import Element, SubElement, indent, tostring
 
 import torch
 from pydantic import BaseModel
-from transformers import PreTrainedModel, PreTrainedTokenizerBase
+
+if TYPE_CHECKING:
+    from transformers import AutoProcessor, PreTrainedModel
 
 from rsenv.client import RSClient
-from rsenv.state import ALL_SKILLS, GameState, Trajectory, xp_to_level
-from rsenv.tools import TOOL_SCHEMAS, parse_tool_call
+from rsenv.state import ALL_SKILLS, XP_FOR_LEVEL, GameState, Trajectory, xp_to_level
+from rsenv.tools import TOOL_SCHEMAS, parse_tool_calls
 
 logger = logging.getLogger(__name__)
 
@@ -29,67 +35,109 @@ def load_system_prompt() -> str:
 
 
 def format_state(state: GameState) -> str:
-    """Render game state as markdown for the LLM."""
-    if state.world_position != (0, 0):
-        pos_str = f"({state.world_position[0]}, {state.world_position[1]})"
-    else:
-        pos_str = f"({state.position[0]}, {state.position[1]})"
+    """Render game state as XML for the LLM."""
+    pos = state.world_position if state.world_position != (0, 0) else state.position
+    root = Element("game_state")
 
-    if state.skill_levels:
-        skills_str = ", ".join(
-            f"{s} {state.skill_levels[s]}" for s in ALL_SKILLS if s in state.skill_levels and state.skill_levels[s] > 1
-        )
-    else:
-        skills_str = ", ".join(
-            f"{s} {xp_to_level(state.skills.get(s, 0))}" for s in ALL_SKILLS if state.skills.get(s, 0) > 0
-        )
-    if not skills_str:
-        skills_str = "All level 1"
-
-    if state.inventory_slots:
-        inv_items = [f"{s.name} x{s.count}" if s.count > 1 else s.name for s in state.inventory_slots]
-        inv_str = ", ".join(inv_items) if inv_items else "Empty"
-    else:
-        inv_str = ", ".join(f"{item} x{qty}" for item, qty in state.inventory.items()) if state.inventory else "Empty"
-
-    nearby_parts: list[str] = []
-    if state.nearby_npcs:
-        for npc in state.nearby_npcs[:10]:
-            combat_str = f" (lvl {npc.combat_level})" if npc.combat_level > 0 else ""
-            hp_npc = f" HP:{npc.hp}/{npc.max_hp}" if npc.max_hp > 0 else ""
-            nearby_parts.append(f"{npc.name}{combat_str}{hp_npc}")
-    if state.nearby_locs:
-        for loc in state.nearby_locs[:10]:
-            opts = f" [{', '.join(loc.options)}]" if loc.options else ""
-            nearby_parts.append(f"{loc.name}{opts}")
-    if state.ground_items:
-        for gi in state.ground_items[:5]:
-            qty = f" x{gi.count}" if gi.count > 1 else ""
-            nearby_parts.append(f"[Ground] {gi.name}{qty}")
-    if not nearby_parts and state.nearby:
-        nearby_parts = list(state.nearby)
-    nearby_str = ", ".join(nearby_parts) if nearby_parts else "Nothing notable"
-
-    lines = [
-        f"Position: {pos_str}",
-        f"HP: {state.hp}/{state.max_hp}",
-        f"Skills: {skills_str}",
-        f"Inventory ({state.inventory_count()}/28): [{inv_str}]",
-        f"Nearby: [{nearby_str}]",
-    ]
-    if state.in_combat:
-        lines.insert(2, "Status: IN COMBAT")
     if state.tick > 0:
-        lines.insert(0, f"Tick: {state.tick}")
+        SubElement(root, "tick").text = str(state.tick)
+    SubElement(root, "position", x=str(pos[0]), z=str(pos[1]))
+    SubElement(root, "hp", current=str(state.hp), max=str(state.max_hp))
+    if state.in_combat:
+        SubElement(root, "status").text = "IN COMBAT"
 
-    return "\n".join(lines)
+    # Skills
+    skills_el = SubElement(root, "skills")
+    has_skills = False
+    for s in ALL_SKILLS:
+        xp = state.skills.get(s, 0)
+        lvl = state.skill_levels.get(s) or xp_to_level(xp)
+        if lvl > 1:
+            has_skills = True
+            xp_next = XP_FOR_LEVEL[lvl + 1] - xp if lvl < 99 else 0
+            SubElement(skills_el, "skill", name=s, level=str(lvl), xp_to_next=str(xp_next))
+    if not has_skills:
+        SubElement(skills_el, "skill", name="all", level="1")
+
+    # Equipment
+    if state.equipment:
+        equip_items = [e for e in state.equipment if e.name]
+        if equip_items:
+            equip_el = SubElement(root, "equipment")
+            for e in equip_items:
+                SubElement(equip_el, "item", name=e.name)
+
+    # Inventory
+    inv_el = SubElement(root, "inventory", used=str(state.inventory_count()), capacity="28")
+    if state.inventory_slots:
+        for s in state.inventory_slots:
+            attrs = {"name": s.name}
+            if s.count > 1:
+                attrs["count"] = str(s.count)
+            SubElement(inv_el, "item", **attrs)
+    elif state.inventory:
+        for item, qty in state.inventory.items():
+            attrs = {"name": item}
+            if qty > 1:
+                attrs["count"] = str(qty)
+            SubElement(inv_el, "item", **attrs)
+
+    # Nearby NPCs
+    npcs = state.nearby_npcs[:8]
+    if npcs:
+        npcs_el = SubElement(root, "npcs")
+        for npc in npcs:
+            attrs: dict[str, str] = {"name": npc.name, "distance": str(npc.distance)}
+            if npc.combat_level > 0:
+                attrs["combat_level"] = str(npc.combat_level)
+            if npc.max_hp > 0 and npc.hp < npc.max_hp:
+                attrs["hp"] = str(npc.hp)
+                attrs["max_hp"] = str(npc.max_hp)
+            if npc.in_combat:
+                attrs["in_combat"] = "true"
+            npc_el = SubElement(npcs_el, "npc", **attrs)
+            for opt in npc.options:
+                SubElement(npc_el, "option").text = opt
+
+    # Nearby objects/locs
+    locs = state.nearby_locs[:8]
+    if locs:
+        objs_el = SubElement(root, "objects")
+        for loc in locs:
+            attrs = {"name": loc.name, "distance": str(loc.distance)}
+            if "Open" in loc.options:
+                attrs["state"] = "closed"
+            elif "Close" in loc.options:
+                attrs["state"] = "open"
+            loc_el = SubElement(objs_el, "object", **attrs)
+            for opt in loc.options:
+                SubElement(loc_el, "option").text = opt
+
+    # Ground items
+    ground = state.ground_items[:6]
+    if ground:
+        ground_el = SubElement(root, "ground_items")
+        for gi in ground:
+            attrs = {"name": gi.name, "distance": str(gi.distance)}
+            if gi.count > 1:
+                attrs["count"] = str(gi.count)
+            SubElement(ground_el, "item", **attrs)
+
+    # Fallback for simple nearby list
+    if not npcs and not locs and not ground and state.nearby:
+        nearby_el = SubElement(root, "nearby")
+        for name in state.nearby:
+            SubElement(nearby_el, "entity", name=name)
+
+    indent(root)
+    return tostring(root, encoding="unicode")
 
 
 def build_messages(state: GameState) -> list[dict]:
-    return [
-        {"role": "system", "content": load_system_prompt()},
-        {"role": "user", "content": format_state(state)},
-    ]
+    system_msg = {"role": "system", "content": load_system_prompt()}
+    state_text = format_state(state)
+
+    return [system_msg, {"role": "user", "content": state_text}]
 
 
 def append_tool_call(messages: list[dict], name: str, args: BaseModel, think_text: str = "") -> None:
@@ -162,7 +210,7 @@ def load_prompt_bank(seed: int = 42) -> list[GameState]:
 
 def rollout_trajectory(
     model: PreTrainedModel,
-    tokenizer: PreTrainedTokenizerBase,
+    processor: "AutoProcessor",
     initial_state: GameState,
     max_actions: int,
     max_new_tokens: int,
@@ -183,22 +231,20 @@ def rollout_trajectory(
         client = SimClient(initial_state)
         state = client.get_state()
 
+    tokenizer = processor.tokenizer
     initial_xp = state.total_xp()
-    has_chat_template = getattr(tokenizer, "chat_template", None) is not None
-    messages = build_messages(state) if has_chat_template else None
+    messages = build_messages(state)
 
-    if has_chat_template:
-        prompt_text = tokenizer.apply_chat_template(
-            messages,
-            tools=TOOL_SCHEMAS,
-            tokenize=False,
-            add_generation_prompt=True,
-            enable_thinking=True,
-        )
-    else:
-        prompt_text = f"{load_system_prompt()}\n\n{format_state(state)}\n\n"
-
-    prompt_ids = tokenizer.encode(prompt_text, return_tensors="pt", add_special_tokens=False)[0]
+    inputs = processor.apply_chat_template(
+        messages,
+        tools=TOOL_SCHEMAS,
+        tokenize=True,
+        add_generation_prompt=True,
+        enable_thinking=True,
+        return_dict=True,
+        return_tensors="pt",
+    )
+    prompt_ids = inputs["input_ids"][0]
     prompt_len = len(prompt_ids)
 
     all_token_ids: list[int] = prompt_ids.tolist()
@@ -214,21 +260,22 @@ def rollout_trajectory(
     num_valid = 0
     _logged_first = False
 
+    generate_kwargs: dict = {
+        "max_new_tokens": max_new_tokens,
+        "temperature": temperature,
+        "do_sample": True,
+        "pad_token_id": tokenizer.pad_token_id,
+        "eos_token_id": stop_ids,
+        "return_dict_in_generate": True,
+        "output_scores": True,
+    }
+
     model.eval()
     for _action_idx in range(max_actions):
         input_ids = torch.tensor([all_token_ids], device=device)
 
         with torch.no_grad():
-            outputs = model.generate(
-                input_ids,
-                max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                do_sample=True,
-                pad_token_id=tokenizer.pad_token_id,
-                eos_token_id=stop_ids,
-                return_dict_in_generate=True,
-                output_scores=True,
-            )
+            outputs = model.generate(input_ids, **generate_kwargs)
 
         new_ids = outputs.sequences[0, len(all_token_ids) :]
         new_text = tokenizer.decode(new_ids, skip_special_tokens=False)
@@ -245,12 +292,9 @@ def rollout_trajectory(
         all_token_ids.extend(new_ids.tolist())
         gen_mask.extend([1] * len(new_ids))
 
-        parsed = parse_tool_call(new_text)
-        if parsed is None:
+        calls = parse_tool_calls(new_text)
+        if not calls:
             break
-
-        action_name, action_args = parsed
-        num_actions += 1
 
         think_text = ""
         think_start = new_text.find("<think>")
@@ -258,29 +302,29 @@ def rollout_trajectory(
         if think_start != -1 and think_end != -1:
             think_text = new_text[think_start + len("<think>") : think_end].strip()
 
-        result = client.execute_action(action_name, action_args)
-        state = client.get_state()
+        for action_name, action_args in calls:
+            num_actions += 1
+            result = client.execute_action(action_name, action_args)
+            state = client.get_state()
 
-        if result.valid:
-            num_valid += 1
+            if result.valid:
+                num_valid += 1
 
-        obs_content = result.observation
-
-        if has_chat_template:
             append_tool_call(messages, action_name, action_args, think_text)
-            append_tool_response(messages, obs_content)
-            full_text = tokenizer.apply_chat_template(
-                messages,
-                tools=TOOL_SCHEMAS,
-                tokenize=False,
-                add_generation_prompt=True,
-                enable_thinking=True,
-            )
-            full_ids = tokenizer.encode(full_text, return_tensors="pt", add_special_tokens=False)[0]
-            env_ids = full_ids[len(all_token_ids) :]
-        else:
-            obs_text = f"\n[Observation] {obs_content}\n\n"
-            env_ids = torch.tensor(tokenizer.encode(obs_text, add_special_tokens=False))
+            append_tool_response(messages, result.observation)
+            think_text = ""
+
+        full_inputs = processor.apply_chat_template(
+            messages,
+            tools=TOOL_SCHEMAS,
+            tokenize=True,
+            add_generation_prompt=True,
+            enable_thinking=True,
+            return_dict=True,
+            return_tensors="pt",
+        )
+        full_ids = full_inputs["input_ids"][0]
+        env_ids = full_ids[len(all_token_ids) :]
 
         all_token_ids.extend(env_ids.tolist())
         gen_mask.extend([0] * len(env_ids))
@@ -291,7 +335,9 @@ def rollout_trajectory(
     reward += total_xp_gained / 100.0
     if num_actions > 0:
         reward += 0.5 * (num_valid / num_actions)
-    reward += 0.1 * min(num_actions, max_actions)
+        reward += 0.1 * min(num_actions, max_actions)
+    else:
+        reward -= 1.0
 
     return Trajectory(
         prompt_ids=torch.tensor(prompt_ids.tolist()[:prompt_len]),

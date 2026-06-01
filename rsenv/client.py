@@ -15,7 +15,7 @@ from pathlib import Path
 from pydantic import BaseModel
 
 from rsenv.state import ActionResult, GameState, GroundItemInfo, InventorySlot, LocInfo, NpcInfo
-from rsenv.tools import LEVEL_REQUIREMENTS, TOOL_NAMES, XP_TABLE
+from rsenv.tools import ACTION_PREREQUISITES, LEVEL_REQUIREMENTS, TOOL_NAMES, XP_TABLE
 
 logger = logging.getLogger(__name__)
 
@@ -55,11 +55,50 @@ class SimClient(RSClient):
         min_level = LEVEL_REQUIREMENTS.get(name, 1)
         skill_for_action = next(iter(XP_TABLE.get(name, {}).keys()), None)
         if skill_for_action and state.level_for_skill(skill_for_action) < min_level:
-            return ActionResult(
-                observation=f"Need {skill_for_action} level {min_level} for {name} (current: {state.level_for_skill(skill_for_action)})",
-                xp_gained={},
-                valid=False,
-            )
+            obs = f"Need {skill_for_action} level {min_level} for {name} (current: {state.level_for_skill(skill_for_action)})"
+            prereqs = ACTION_PREREQUISITES.get(name)
+            if prereqs:
+                obs += f" | Requires: {', '.join(prereqs)}"
+            return ActionResult(observation=obs, xp_gained={}, valid=False)
+
+        # Item prerequisite checks
+        inv_names = set(state.inventory.keys())
+        equip_names = {e.name for e in state.equipment} if state.equipment else set()
+        all_held = inv_names | equip_names
+
+        if name in ("chopTree", "chopOak"):
+            has_axe = any("axe" in item_name.lower() for item_name in all_held)
+            if not has_axe:
+                return ActionResult(
+                    observation=f"Cannot {name}: no axe equipped or in inventory. | Requires: Axe equipped or in inventory",
+                    xp_gained={},
+                    valid=False,
+                )
+
+        if name in ("mineRock", "mineIron"):
+            has_pick = any("pickaxe" in item_name.lower() for item_name in all_held)
+            if not has_pick:
+                return ActionResult(
+                    observation=f"Cannot {name}: no pickaxe equipped or in inventory. | Requires: Pickaxe equipped or in inventory",
+                    xp_gained={},
+                    valid=False,
+                )
+
+        if name == "fletchLogs":
+            has_knife = any("knife" in item_name.lower() for item_name in all_held)
+            has_logs = any("log" in item_name.lower() for item_name in inv_names)
+            if not has_knife:
+                return ActionResult(
+                    observation="Cannot fletch: no Knife in inventory (daggers/swords do not work). | Requires: Knife in inventory, Logs in inventory",
+                    xp_gained={},
+                    valid=False,
+                )
+            if not has_logs:
+                return ActionResult(
+                    observation="Cannot fletch: no logs in inventory. | Requires: Knife in inventory, Logs in inventory",
+                    xp_gained={},
+                    valid=False,
+                )
 
         xp_gained = dict(XP_TABLE.get(name, {}))
         parts: list[str] = []
@@ -231,9 +270,7 @@ class BridgeClient(RSClient):
         )
 
     def reset(self, initial_state: GameState | None = None) -> GameState:
-        # Don't disconnect/reconnect — just refresh state. The bot stays in-game.
         return self.get_state()
-        return self._state
 
     @property
     def is_running(self) -> bool:

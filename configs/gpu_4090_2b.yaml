@@ -1,14 +1,13 @@
-# uv run python -m train --config-name=gpu_4090_2b ++paths.model_name=gemma2b_001
+# Sim training with Qwen3.5-2B
+# uv run python -m train --config-name=gpu_4090_2b ++paths.model_name=qwen2b_001
 defaults:
-  - base
+  - sim_base
   - _self_
 
 model:
-  model_name_or_path: "google/gemma-4-E2B-it"
+  model_name_or_path: "Qwen/Qwen3.5-2B"
   quantize_int4: true
 
 grpo:
-  learning_rate: 1.e-5
-  max_steps: 5000
   log_interval: 10
   checkpoint_interval: 200
