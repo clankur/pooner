@@ -1,23 +1,9 @@
-# Live game training via rs-sdk bridge
-# Requires LostCity server + gateway running
-# uv run python -m train --config-name=gpu_4090_live ++paths.model_name=live_001
+# Live game training with Qwen3.5-4B
+# uv run python -m train --config-name=gpu_4090_live ++paths.model_name=live_4b_001
 defaults:
-  - base
+  - live_base
   - _self_
 
 model:
   model_name_or_path: "Qwen/Qwen3.5-4B"
   quantize_int4: false
-  max_new_tokens: 8192
-
-grpo:
-  group_size: 2
-  learning_rate: 3.e-5
-  max_steps: 5
-  log_interval: 1
-  checkpoint_interval: 0
-  kl_coeff: 0.0
-
-env:
-  max_actions: 5
-  use_heuristic_reward: false

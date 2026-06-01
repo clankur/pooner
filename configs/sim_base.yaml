@@ -1,0 +1,21 @@
+# Base config for heuristic simulator training (no game server needed)
+# Other sim configs should inherit from this with: defaults: [sim_base, _self_]
+defaults:
+  - base
+  - _self_
+
+model:
+  max_new_tokens: 4096
+  temperature: 0.8
+
+grpo:
+  group_size: 8
+  learning_rate: 1.e-5
+  max_steps: 5000
+  log_interval: 5
+  checkpoint_interval: 100
+  kl_coeff: 0.05
+
+env:
+  max_actions: 20
+  use_heuristic_reward: true

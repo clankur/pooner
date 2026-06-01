@@ -1,0 +1,22 @@
+# Base config for live game training via rs-sdk bridge
+# Requires LostCity server + gateway running
+# Other live configs should inherit from this with: defaults: [live_base, _self_]
+defaults:
+  - base
+  - _self_
+
+model:
+  max_new_tokens: 4096
+  temperature: 0.7
+
+grpo:
+  group_size: 4
+  learning_rate: 3.e-5
+  max_steps: 100
+  log_interval: 1
+  checkpoint_interval: 25
+  kl_coeff: 0.0
+
+env:
+  max_actions: 10
+  use_heuristic_reward: false

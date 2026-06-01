@@ -1,13 +1,12 @@
-# Quick GPU iteration: Qwen3-4B with fewer steps/smaller groups
+# Quick sim iteration with Qwen3.5-4B (fewer steps/smaller groups)
 # uv run python -m train --config-name=gpu_4090_quick ++paths.model_name=quick_001
 defaults:
-  - base
+  - sim_base
   - _self_
 
 model:
   model_name_or_path: "Qwen/Qwen3.5-4B"
   quantize_int4: false
-  max_new_tokens: 8192
 
 grpo:
   group_size: 4

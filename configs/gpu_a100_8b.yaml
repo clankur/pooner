@@ -1,6 +1,7 @@
-# uv run python -m train --config-name=gpu_a100_8b ++paths.model_name=qwen8b_001
+# Sim training with Qwen3.5-9B on A100
+# uv run python -m train --config-name=gpu_a100_8b ++paths.model_name=qwen9b_001
 defaults:
-  - base
+  - sim_base
   - _self_
 
 model:
@@ -9,6 +10,5 @@ model:
 
 grpo:
   learning_rate: 5.e-6
-  max_steps: 5000
   log_interval: 10
   checkpoint_interval: 200
