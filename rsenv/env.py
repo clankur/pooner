@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import random
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
 from xml.etree.ElementTree import Element, SubElement, indent, tostring
@@ -217,6 +218,7 @@ def rollout_trajectory(
     temperature: float,
     device: torch.device,
     client: RSClient | None = None,
+    model_lock: threading.Lock | None = None,
 ) -> Trajectory:
     """Roll out a plan-then-execute trajectory.
 
@@ -274,8 +276,14 @@ def rollout_trajectory(
     for _action_idx in range(max_actions):
         input_ids = torch.tensor([all_token_ids], device=device)
 
-        with torch.no_grad():
-            outputs = model.generate(input_ids, **generate_kwargs)
+        if model_lock is not None:
+            model_lock.acquire()
+        try:
+            with torch.no_grad():
+                outputs = model.generate(input_ids, **generate_kwargs)
+        finally:
+            if model_lock is not None:
+                model_lock.release()
 
         new_ids = outputs.sequences[0, len(all_token_ids) :]
         new_text = tokenizer.decode(new_ids, skip_special_tokens=False)

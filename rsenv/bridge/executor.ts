@@ -534,6 +534,16 @@ async function executeAction(
         break;
       }
 
+      case "adminCommand": {
+        const command = args.command as string;
+        // Admin commands (:: prefix) are sent as chat and interpreted server-side at staffModLevel 3+
+        await sdk.sendSay(command);
+        await sdk.waitForTicks(1);
+        success = true;
+        message = `Executed admin command: ${command}`;
+        break;
+      }
+
       default:
         return {
           type: "error",

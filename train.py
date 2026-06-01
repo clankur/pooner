@@ -7,8 +7,10 @@ Usage:
 import json
 import logging
 import os
+import threading
 import time
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 
 import hydra
@@ -19,7 +21,7 @@ from einops import rearrange
 from omegaconf import DictConfig, OmegaConf
 from transformers import AutoProcessor, Qwen3_5ForConditionalGeneration
 
-from rsenv import BridgeClient, SimClient, Trajectory, load_prompt_bank, rollout_trajectory
+from rsenv import BridgeClient, BridgeClientPool, SimClient, Trajectory, load_prompt_bank, rollout_trajectory
 
 logging.basicConfig(level=logging.INFO, format="%(name)s: %(message)s")
 
@@ -56,6 +58,7 @@ class EnvConfig:
     gateway_url: str = "ws://localhost:7780"
     bot_username: str = "grpo_agent"
     bot_password: str = ""
+    num_bots: int = 1
 
 
 @dataclass(frozen=True)
@@ -324,15 +327,28 @@ def train(config: Config) -> None:
 
     # Game client: live server or heuristic simulator
     client: SimClient | BridgeClient | None = None
+    client_pool: BridgeClientPool | None = None
+
     if not config.env.use_heuristic_reward:
-        print(f"Starting bridge client: {config.env.gateway_url} as {config.env.bot_username}")
-        client = BridgeClient(
-            gateway_url=config.env.gateway_url,
-            bot_username=config.env.bot_username,
-            bot_password=config.env.bot_password,
-        )
-        initial_state = client.start()
-        print(f"Bridge connected. Position: {initial_state.position}, HP: {initial_state.hp}/{initial_state.max_hp}")
+        if config.env.num_bots > 1:
+            print(f"Starting {config.env.num_bots} bridge clients...")
+            client_pool = BridgeClientPool(
+                num_clients=config.env.num_bots,
+                gateway_url=config.env.gateway_url,
+            )
+            client_pool.start_all()
+            print(f"All {config.env.num_bots} bridge clients connected")
+        else:
+            print(f"Starting bridge client: {config.env.gateway_url} as {config.env.bot_username}")
+            client = BridgeClient(
+                gateway_url=config.env.gateway_url,
+                bot_username=config.env.bot_username,
+                bot_password=config.env.bot_password,
+            )
+            initial_state = client.start()
+            print(
+                f"Bridge connected. Position: {initial_state.position}, HP: {initial_state.hp}/{initial_state.max_hp}"
+            )
 
     prompt_bank = load_prompt_bank(seed=config.grpo.seed)
     model_dir = os.path.join(config.paths.root_working_dir, config.paths.model_name)
@@ -353,18 +369,43 @@ def train(config: Config) -> None:
 
         # ── 1. Roll out K trajectories ──
         trajectories: list[Trajectory] = []
-        for _k in range(config.grpo.group_size):
-            traj = rollout_trajectory(
-                model=model,
-                processor=processor,
-                initial_state=state,
-                max_actions=config.env.max_actions,
-                max_new_tokens=config.model.max_new_tokens,
-                temperature=config.model.temperature,
-                device=device,
-                client=client,
-            )
-            trajectories.append(traj)
+
+        if client_pool is not None:
+            # Reset all bots to identical state via admin commands, then run rollouts in parallel.
+            # model_lock serializes GPU inference since the model is not thread-safe.
+            client_pool.reset_all(state)
+            model_lock = threading.Lock()
+            K = min(config.grpo.group_size, len(client_pool))
+
+            def _run_rollout(k: int) -> Trajectory:
+                return rollout_trajectory(
+                    model=model,
+                    processor=processor,
+                    initial_state=state,
+                    max_actions=config.env.max_actions,
+                    max_new_tokens=config.model.max_new_tokens,
+                    temperature=config.model.temperature,
+                    device=device,
+                    client=client_pool[k],
+                    model_lock=model_lock,
+                )
+
+            with ThreadPoolExecutor(max_workers=K) as executor:
+                futures = [executor.submit(_run_rollout, k) for k in range(K)]
+                trajectories = [f.result() for f in futures]
+        else:
+            for _k in range(config.grpo.group_size):
+                traj = rollout_trajectory(
+                    model=model,
+                    processor=processor,
+                    initial_state=state,
+                    max_actions=config.env.max_actions,
+                    max_new_tokens=config.model.max_new_tokens,
+                    temperature=config.model.temperature,
+                    device=device,
+                    client=client,
+                )
+                trajectories.append(traj)
 
         # Free generation KV cache before training
         torch.cuda.empty_cache() if device.type == "cuda" else None
@@ -479,7 +520,10 @@ def train(config: Config) -> None:
         for m in metrics_log:
             f.write(json.dumps(asdict(m)) + "\n")
 
-    if isinstance(client, BridgeClient):
+    if client_pool is not None:
+        client_pool.stop_all()
+        print("Bridge client pool stopped")
+    elif isinstance(client, BridgeClient):
         client.stop()
         print("Bridge client stopped")
 

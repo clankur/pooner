@@ -4,13 +4,14 @@ Black-box game interface: train.py imports the trajectory rollout and
 prompt bank, everything else (simulator, bridge, tools, prompts) is internal.
 """
 
-from rsenv.client import BridgeClient, RSClient, SimClient
+from rsenv.client import BridgeClient, BridgeClientPool, RSClient, SimClient
 from rsenv.env import format_state, load_prompt_bank, rollout_trajectory
 from rsenv.state import GameState, Trajectory
 from rsenv.tools import TOOL_SCHEMAS, parse_tool_call, parse_tool_calls
 
 __all__ = [
     "BridgeClient",
+    "BridgeClientPool",
     "GameState",
     "RSClient",
     "SimClient",
