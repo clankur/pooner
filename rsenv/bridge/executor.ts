@@ -503,7 +503,7 @@ async function executeAction(
         const result = await bot.pickupItem(new RegExp(itemName, "i"));
         success = result.success;
         message = result.message;
-        if (!success && !result.reason?.includes("not_found")) {
+        if (!success && !message.toLowerCase().includes("path") && !result.reason?.includes("not_found")) {
           message += PATH_BLOCKED_HINT;
         }
         reason = result.reason;

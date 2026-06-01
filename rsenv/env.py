@@ -222,7 +222,6 @@ def rollout_trajectory(
 
     If client is provided, actions execute through it (sim or live).
     If client is None, a temporary SimClient is created from initial_state.
-    Screenshots from the initial state are encoded as image tokens via the processor.
     """
     if client is not None:
         state = client.reset(initial_state)
@@ -236,7 +235,6 @@ def rollout_trajectory(
     initial_xp = state.total_xp()
     messages = build_messages(state)
 
-    # Processor handles text tokenization + image encoding in one call
     inputs = processor.apply_chat_template(
         messages,
         tools=TOOL_SCHEMAS,
@@ -247,9 +245,6 @@ def rollout_trajectory(
         return_tensors="pt",
     )
     prompt_ids = inputs["input_ids"][0]
-    pixel_values = inputs.get("pixel_values")
-    image_grid_thw = inputs.get("image_grid_thw")
-
     prompt_len = len(prompt_ids)
 
     all_token_ids: list[int] = prompt_ids.tolist()
@@ -274,10 +269,6 @@ def rollout_trajectory(
         "return_dict_in_generate": True,
         "output_scores": True,
     }
-    if pixel_values is not None:
-        generate_kwargs["pixel_values"] = pixel_values.to(device)
-        if image_grid_thw is not None:
-            generate_kwargs["image_grid_thw"] = image_grid_thw.to(device)
 
     model.eval()
     for _action_idx in range(max_actions):
@@ -285,10 +276,6 @@ def rollout_trajectory(
 
         with torch.no_grad():
             outputs = model.generate(input_ids, **generate_kwargs)
-
-        # Image embeddings only needed on first pass — remove after use
-        generate_kwargs.pop("pixel_values", None)
-        generate_kwargs.pop("image_grid_thw", None)
 
         new_ids = outputs.sequences[0, len(all_token_ids) :]
         new_text = tokenizer.decode(new_ids, skip_special_tokens=False)
@@ -348,7 +335,9 @@ def rollout_trajectory(
     reward += total_xp_gained / 100.0
     if num_actions > 0:
         reward += 0.5 * (num_valid / num_actions)
-    reward += 0.1 * min(num_actions, max_actions)
+        reward += 0.1 * min(num_actions, max_actions)
+    else:
+        reward -= 1.0
 
     return Trajectory(
         prompt_ids=torch.tensor(prompt_ids.tolist()[:prompt_len]),
