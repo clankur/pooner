@@ -1,0 +1,8 @@
+---
+title: "RL experiment reports"
+---
+
+Experiment reports from [pooner](https://github.com/clankur/pooner), a GRPO training codebase for teaching a small LLM to play RuneScape.
+
+| Report | Summary |
+|--------|---------|

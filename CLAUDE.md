@@ -59,6 +59,13 @@ uvx ruff check
 uvx ruff format
 ```
 
+### Docs (Quarto)
+
+```
+quarto preview docs
+quarto render docs
+```
+
 ### Tests
 
 There is no test suite. The local test config is the smoke test.
