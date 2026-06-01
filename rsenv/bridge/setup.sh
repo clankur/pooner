@@ -2,6 +2,8 @@
 # Clone rs-sdk, install deps, create a bot account.
 set -euo pipefail
 
+NUM_BOTS="${1:-8}"
+
 BRIDGE_DIR="$(cd "$(dirname "$0")" && pwd)"
 SDK_DIR="$BRIDGE_DIR/rs-sdk"
 
@@ -30,7 +32,7 @@ if [ "$(uname)" = "Linux" ] && [ -f server/webclient/src/io/Jagfile.ts ] && [ ! 
 fi
 
 # Create bot accounts if they don't exist
-for i in $(seq 1 8); do
+for i in $(seq 1 $NUM_BOTS); do
     BOT_NAME="grpobot${i}"
     if [ ! -d "$SDK_DIR/bots/$BOT_NAME" ]; then
         echo "Creating bot account: $BOT_NAME (local server)"
@@ -49,7 +51,7 @@ fi
 
 echo ""
 echo "Setup complete."
-echo "  grpobot1..grpobot8 — parallel training agents"
+echo "  grpobot1..grpobot${NUM_BOTS} — parallel training agents"
 echo "  monitor1           — your observer account"
 echo ""
 echo "To start the local game server, run:"
