@@ -7,6 +7,7 @@ Two implementations:
 
 import json
 import logging
+import shutil
 import subprocess
 import threading
 from abc import ABC, abstractmethod
@@ -396,3 +397,64 @@ class BridgeClient(RSClient):
             in_combat=data.get("inCombat", False),
             in_game=data.get("inGame", False),
         )
+
+
+# ─── Pool of bridge clients for parallel rollouts ─────────────────────────
+
+
+class BridgeClientPool:
+    """Pool of K BridgeClient instances for parallel rollouts.
+
+    All bots share byte-identical save state via clone_saves(), so each
+    rollout starts from the same position and inventory despite running
+    concurrently on separate bot processes.
+    """
+
+    def __init__(
+        self,
+        num_clients: int,
+        gateway_url: str = "ws://localhost:7780",
+        bot_prefix: str = "grpobot",
+        bridge_dir: str | None = None,
+    ) -> None:
+        self.bot_prefix = bot_prefix
+        self.bridge_dir = bridge_dir or str(Path(__file__).parent / "bridge")
+        self.clients: list[BridgeClient] = [
+            BridgeClient(
+                gateway_url=gateway_url,
+                bot_username=f"{bot_prefix}{i}",
+                bot_password="",
+                bridge_dir=self.bridge_dir,
+            )
+            for i in range(1, num_clients + 1)
+        ]
+
+    def clone_saves(self, source_bot: str = "grpobot1") -> None:
+        """Copy source bot's .sav to all other bots so every rollout starts from identical state."""
+        save_dir = Path(self.bridge_dir) / "rs-sdk" / "server" / "engine" / "data" / "players" / "main"
+        source_sav = save_dir / f"{source_bot}.sav"
+        if not source_sav.exists():
+            logger.warning("Source save %s not found, skipping clone", source_sav)
+            return
+        for client in self.clients:
+            if client.bot_username == source_bot:
+                continue
+            dest_sav = save_dir / f"{client.bot_username}.sav"
+            shutil.copy2(str(source_sav), str(dest_sav))
+            logger.info("Cloned %s -> %s", source_sav.name, dest_sav.name)
+
+    def start_all(self) -> list[GameState]:
+        return [client.start() for client in self.clients]
+
+    def stop_all(self) -> None:
+        for client in self.clients:
+            try:
+                client.stop()
+            except Exception:
+                logger.exception("Failed to stop %s", client.bot_username)
+
+    def __len__(self) -> int:
+        return len(self.clients)
+
+    def __getitem__(self, idx: int) -> BridgeClient:
+        return self.clients[idx]

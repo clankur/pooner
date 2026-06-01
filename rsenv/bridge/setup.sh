@@ -30,7 +30,8 @@ if [ "$(uname)" = "Linux" ] && [ -f server/webclient/src/io/Jagfile.ts ] && [ ! 
 fi
 
 # Create bot accounts if they don't exist
-for BOT_NAME in grpobot1 monitor1; do
+for i in $(seq 1 8); do
+    BOT_NAME="grpobot${i}"
     if [ ! -d "$SDK_DIR/bots/$BOT_NAME" ]; then
         echo "Creating bot account: $BOT_NAME (local server)"
         bun bots/create-bot.ts "$BOT_NAME" --local --no-chat
@@ -39,10 +40,17 @@ for BOT_NAME in grpobot1 monitor1; do
     fi
 done
 
+if [ ! -d "$SDK_DIR/bots/monitor1" ]; then
+    echo "Creating bot account: monitor1 (local server)"
+    bun bots/create-bot.ts monitor1 --local --no-chat
+else
+    echo "Bot monitor1 already exists"
+fi
+
 echo ""
 echo "Setup complete."
-echo "  grpobot1 — training agent"
-echo "  monitor1 — your observer account"
+echo "  grpobot1..grpobot8 — parallel training agents"
+echo "  monitor1           — your observer account"
 echo ""
 echo "To start the local game server, run:"
 echo "  ./start-server.sh"
