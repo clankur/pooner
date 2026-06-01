@@ -218,33 +218,22 @@ SPAWN_LOCATIONS: list[tuple[int, int]] = [
     (3212, 3247),  # Lumbridge general store (walking.md)
 ]
 
-# Starter tool kits — each is (inventory_dict, relevant_skills_to_randomize)
-_STARTER_KITS: list[tuple[dict[str, int], list[str]]] = [
-    ({"Bronze axe": 1, "Coins": 25}, ["Woodcutting"]),
-    ({"Bronze pickaxe": 1, "Coins": 25}, ["Mining"]),
-    ({"Bronze sword": 1, "Wooden shield": 1}, ["Attack", "Strength", "Defence"]),
-    ({"Small fishing net": 1, "Coins": 25}, ["Fishing"]),
-    ({"Coins": 100}, []),
-]
-
 
 def random_starting_state(rng: random.Random) -> GameState:
-    """Generate a randomized starting state with vetted coordinates and varied skills."""
+    """Randomize coordinates and skills, keep inventory from the prompt bank."""
+    base = rng.choice(STARTING_STATES).copy()
     pos = rng.choice(SPAWN_LOCATIONS)
-    kit_inv, kit_skills = rng.choice(_STARTER_KITS)
+    base.position = pos
+    base.world_position = pos
 
-    skills: dict[str, int] = {"Hitpoints": 1154}
-    for skill in kit_skills:
+    # Randomize skill levels (1-15) for any non-Hitpoints skills the base state has
+    for skill, xp in list(base.skills.items()):
+        if skill == "Hitpoints":
+            continue
         level = rng.randint(1, 15)
-        if level > 1:
-            skills[skill] = XP_FOR_LEVEL[level]
+        base.skills[skill] = XP_FOR_LEVEL[level]
 
-    return GameState(
-        position=pos,
-        world_position=pos,
-        skills=skills,
-        inventory=dict(kit_inv),
-    )
+    return base
 
 
 # ─── Trajectory rollout ───────────────────────────────────────────────────
