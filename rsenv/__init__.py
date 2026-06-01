@@ -5,7 +5,7 @@ prompt bank, everything else (simulator, bridge, tools, prompts) is internal.
 """
 
 from rsenv.client import BridgeClient, BridgeClientPool, RSClient, SimClient
-from rsenv.env import format_state, load_prompt_bank, rollout_trajectory
+from rsenv.env import format_state, load_prompt_bank, random_starting_state, rollout_trajectory
 from rsenv.state import GameState, Trajectory
 from rsenv.tools import TOOL_SCHEMAS, parse_tool_call, parse_tool_calls
 
@@ -21,5 +21,6 @@ __all__ = [
     "load_prompt_bank",
     "parse_tool_call",
     "parse_tool_calls",
+    "random_starting_state",
     "rollout_trajectory",
 ]

@@ -206,6 +206,47 @@ def load_prompt_bank(seed: int = 42) -> list[GameState]:
     return bank
 
 
+# Vetted spawn locations around Lumbridge — each is a walkable tile near useful resources.
+SPAWN_LOCATIONS: list[tuple[int, int]] = [
+    (3222, 3218),  # Lumbridge castle courtyard (default)
+    (3200, 3209),  # West of Lumbridge, near trees
+    (3230, 3237),  # North Lumbridge, near goblins
+    (3182, 3184),  # Lumbridge swamp mine (copper/tin)
+    (3152, 3206),  # Draynor Village bank area
+    (3254, 3179),  # Al Kharid mine area
+    (3243, 3244),  # Lumbridge cow field
+    (3103, 3230),  # Barbarian Village fishing spot
+]
+
+# Starter tool kits — each is (inventory_dict, relevant_skills_to_randomize)
+_STARTER_KITS: list[tuple[dict[str, int], list[str]]] = [
+    ({"Bronze axe": 1, "Coins": 25}, ["Woodcutting"]),
+    ({"Bronze pickaxe": 1, "Coins": 25}, ["Mining"]),
+    ({"Bronze sword": 1, "Wooden shield": 1}, ["Attack", "Strength", "Defence"]),
+    ({"Small fishing net": 1, "Coins": 25}, ["Fishing"]),
+    ({"Coins": 100}, []),
+]
+
+
+def random_starting_state(rng: random.Random) -> GameState:
+    """Generate a randomized starting state with vetted coordinates and varied skills."""
+    pos = rng.choice(SPAWN_LOCATIONS)
+    kit_inv, kit_skills = rng.choice(_STARTER_KITS)
+
+    skills: dict[str, int] = {"Hitpoints": 1154}
+    for skill in kit_skills:
+        level = rng.randint(1, 15)
+        if level > 1:
+            skills[skill] = XP_FOR_LEVEL[level]
+
+    return GameState(
+        position=pos,
+        world_position=pos,
+        skills=skills,
+        inventory=dict(kit_inv),
+    )
+
+
 # ─── Trajectory rollout ───────────────────────────────────────────────────
 
 
