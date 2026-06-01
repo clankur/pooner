@@ -32,6 +32,12 @@ $headings-color: #f0f0f0;
   background-color: $navbar-bg;
 }
 
+pre {
+  background-color: $code-bg;
+  color: $code-color;
+  border: 1px solid $card-border-color;
+}
+
 pre.sourceCode {
   background-color: $code-bg;
   border: 1px solid $card-border-color;
