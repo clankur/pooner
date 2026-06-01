@@ -21,7 +21,7 @@ from einops import rearrange
 from omegaconf import DictConfig, OmegaConf
 from transformers import AutoProcessor, Qwen3_5ForConditionalGeneration
 
-from rsenv import BridgeClient, BridgeClientPool, SimClient, Trajectory, load_prompt_bank, rollout_trajectory
+from rsenv import BridgeClient, BridgeClientPool, GameState, SimClient, Trajectory, load_prompt_bank, rollout_trajectory
 
 logging.basicConfig(level=logging.INFO, format="%(name)s: %(message)s")
 
@@ -363,6 +363,9 @@ def train(config: Config) -> None:
 
     metrics_log: list[StepMetrics] = []
     t_start = time.time()
+    # Curriculum: after the first step, reset to the best performer's final state
+    # so each step builds on the strongest prior trajectory rather than the same start.
+    carry_state: GameState | None = None
 
     for step in range(config.grpo.max_steps):
         state = prompt_bank[step % len(prompt_bank)]
@@ -372,8 +375,11 @@ def train(config: Config) -> None:
 
         if client_pool is not None:
             # Reset all bots to identical state via admin commands, then run rollouts in parallel.
+            # Use best performer's final state from the previous step when available, so each
+            # step starts from a progressively stronger position (curriculum learning).
             # model_lock serializes GPU inference since the model is not thread-safe.
-            client_pool.reset_all(state)
+            reset_target = carry_state if carry_state is not None else state
+            client_pool.reset_all(reset_target)
             model_lock = threading.Lock()
             K = min(config.grpo.group_size, len(client_pool))
 
@@ -381,7 +387,7 @@ def train(config: Config) -> None:
                 return rollout_trajectory(
                     model=model,
                     processor=processor,
-                    initial_state=state,
+                    initial_state=reset_target,
                     max_actions=config.env.max_actions,
                     max_new_tokens=config.model.max_new_tokens,
                     temperature=config.model.temperature,
@@ -393,6 +399,10 @@ def train(config: Config) -> None:
             with ThreadPoolExecutor(max_workers=K) as executor:
                 futures = [executor.submit(_run_rollout, k) for k in range(K)]
                 trajectories = [f.result() for f in futures]
+
+            # Carry forward the best performer's state for next step
+            best_idx = max(range(len(trajectories)), key=lambda i: trajectories[i].total_reward)
+            carry_state = trajectories[best_idx].final_state
         else:
             for _k in range(config.grpo.group_size):
                 traj = rollout_trajectory(

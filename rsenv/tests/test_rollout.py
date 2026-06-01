@@ -58,9 +58,9 @@ def test_rollout_with_bridge(model_and_processor, bridge_client):
     assert traj.generation_mask.sum() > 0, "At least some tokens should be model-generated"
 
     text = processor.tokenizer.decode(traj.full_ids, skip_special_tokens=False)
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"LIVE TRAJECTORY ({traj.num_actions} actions, {traj.num_valid_actions} valid)")
     print(f"XP gained: {traj.total_xp:.0f} | Reward: {traj.total_reward:.2f}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     print(text)
     print(f"\nFinal state:\n{format_state(traj.final_state)}")
