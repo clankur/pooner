@@ -6,6 +6,7 @@ Usage:
 
 import json
 import logging
+import math
 import os
 import random
 import threading
@@ -50,7 +51,9 @@ class GRPOConfig:
     group_size: int = 8
     clip_epsilon: float = 0.2
     kl_coeff: float = 0.05
-    learning_rate: float = 1e-5
+    lr_max: float = 1e-5
+    lr_min: float = 1e-6
+    warmup_steps: int = 10
     max_grad_norm: float = 1.0
     update_epochs: int = 2
     max_steps: int = 5000
@@ -68,6 +71,7 @@ class EnvConfig:
     bot_username: str = "grpo_agent"
     bot_password: str = ""
     num_bots: int = 1
+    xp_multiplier: int = 1
 
 
 @dataclass(frozen=True)
@@ -273,12 +277,37 @@ def grpo_loss(
     return total_loss, policy_loss, kl_loss
 
 
+# ─── LR schedule ──────────────────────────────────────────────────────────
+
+
+def build_lr_scheduler(
+    optimizer: torch.optim.Optimizer,
+    grpo_config: GRPOConfig,
+) -> torch.optim.lr_scheduler.LambdaLR:
+    """Linear warmup for warmup_steps, then cosine decay to lr_min over remaining steps."""
+    warmup = grpo_config.warmup_steps
+    total = grpo_config.max_steps
+    lr_max = grpo_config.lr_max
+    lr_min = grpo_config.lr_min
+    min_ratio = lr_min / lr_max if lr_max > 0 else 0.0
+
+    def lr_lambda(step: int) -> float:
+        if step < warmup:
+            frac = (step + 1) / max(warmup, 1)
+            return min_ratio + (1.0 - min_ratio) * frac
+        progress = (step - warmup) / max(total - warmup, 1)
+        return min_ratio + (1.0 - min_ratio) * 0.5 * (1.0 + math.cos(math.pi * progress))
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+
 # ─── Training loop ─────────────────────────────────────────────────────────
 
 
 @dataclass
 class StepMetrics:
     step: int
+    learning_rate: float
     group_mean_reward: float
     group_std_reward: float
     group_min_reward: float
@@ -286,6 +315,9 @@ class StepMetrics:
     group_mean_xp: float
     mean_actions: float
     mean_valid_actions: float
+    mean_level_ups: float
+    mean_tokens_per_action: float
+    idle_count: int
     policy_loss: float
     kl_loss: float
     total_loss: float
@@ -331,8 +363,9 @@ def train(config: Config) -> None:
 
     optimizer = torch.optim.AdamW(
         [p for p in model.parameters() if p.requires_grad],
-        lr=config.grpo.learning_rate,
+        lr=config.grpo.lr_max,
     )
+    scheduler = build_lr_scheduler(optimizer, config.grpo)
 
     # Game client: live server or heuristic simulator
     client: SimClient | BridgeClient | None = None
@@ -398,6 +431,7 @@ def train(config: Config) -> None:
                     device=device,
                     client=client_pool[k],
                     model_lock=model_lock,
+                    xp_multiplier=config.env.xp_multiplier,
                 )
 
             with ThreadPoolExecutor(max_workers=K) as executor:
@@ -414,6 +448,7 @@ def train(config: Config) -> None:
                     temperature=config.model.temperature,
                     device=device,
                     client=client,
+                    xp_multiplier=config.env.xp_multiplier,
                 )
                 trajectories.append(traj)
 
@@ -472,17 +507,27 @@ def train(config: Config) -> None:
             epoch_policy.append(policy_accum)
             epoch_kl.append(kl_accum)
 
+        current_lr = scheduler.get_last_lr()[0]
+        scheduler.step()
+
         # ── 5. Log metrics ──
         rewards = torch.tensor(group.rewards)
+        total_actions_sum = sum(t.num_actions for t in trajectories)
         metrics = StepMetrics(
             step=step,
+            learning_rate=current_lr,
             group_mean_reward=rewards.mean().item(),
             group_std_reward=rewards.std().item(),
             group_min_reward=rewards.min().item(),
             group_max_reward=rewards.max().item(),
             group_mean_xp=sum(t.total_xp for t in trajectories) / len(trajectories),
-            mean_actions=sum(t.num_actions for t in trajectories) / len(trajectories),
+            mean_actions=total_actions_sum / len(trajectories),
             mean_valid_actions=sum(t.num_valid_actions for t in trajectories) / len(trajectories),
+            mean_level_ups=sum(t.num_level_ups for t in trajectories) / len(trajectories),
+            mean_tokens_per_action=(
+                sum(t.total_gen_tokens for t in trajectories) / max(total_actions_sum, 1)
+            ),
+            idle_count=sum(1 for t in trajectories if t.total_xp == 0 and t.num_actions > 0),
             policy_loss=sum(epoch_policy) / len(epoch_policy),
             kl_loss=sum(epoch_kl) / len(epoch_kl),
             total_loss=sum(epoch_losses) / len(epoch_losses),
@@ -498,6 +543,7 @@ def train(config: Config) -> None:
                 f"actions={metrics.mean_actions:>4.1f}/{metrics.mean_valid_actions:>4.1f} "
                 f"loss={metrics.total_loss:>8.4f} "
                 f"kl={metrics.kl_loss:>7.4f} "
+                f"lr={metrics.learning_rate:.2e} "
                 f"t={metrics.elapsed_sec:>6.1f}s",
                 flush=True,
             )
@@ -508,21 +554,41 @@ def train(config: Config) -> None:
                     "group_mean_xp": metrics.group_mean_xp,
                     "mean_actions": metrics.mean_actions,
                     "mean_valid_actions": metrics.mean_valid_actions,
+                    "mean_level_ups": metrics.mean_level_ups,
+                    "mean_tokens_per_action": metrics.mean_tokens_per_action,
+                    "idle_count": metrics.idle_count,
                     "policy_loss": metrics.policy_loss,
                     "kl_loss": metrics.kl_loss,
                     "total_loss": metrics.total_loss,
+                    "learning_rate": metrics.learning_rate,
                 },
                 step=step,
             )
 
         if config.grpo.checkpoint_interval > 0 and step > 0 and step % config.grpo.checkpoint_interval == 0:
             ckpt_path = os.path.join(model_dir, f"checkpoint_{step}.pt")
-            torch.save({"model": model.state_dict(), "optimizer": optimizer.state_dict(), "step": step}, ckpt_path)
+            torch.save(
+                {
+                    "model": model.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "scheduler": scheduler.state_dict(),
+                    "step": step,
+                },
+                ckpt_path,
+            )
             print(f"  -> saved {ckpt_path}", flush=True)
 
     # ── Final save ──
     final_path = os.path.join(model_dir, "checkpoint_final.pt")
-    torch.save({"model": model.state_dict(), "optimizer": optimizer.state_dict(), "step": step}, final_path)
+    torch.save(
+        {
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict(),
+            "step": step,
+        },
+        final_path,
+    )
     print(f"  -> saved {final_path}", flush=True)
 
     metrics_path = os.path.join(model_dir, "metrics.jsonl")

@@ -165,4 +165,6 @@ class Trajectory:
     total_xp: float
     num_actions: int
     num_valid_actions: int
+    num_level_ups: int
+    total_gen_tokens: int
     final_state: GameState
