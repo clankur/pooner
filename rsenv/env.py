@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import random
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
 from xml.etree.ElementTree import Element, SubElement, indent, tostring
@@ -205,6 +206,36 @@ def load_prompt_bank(seed: int = 42) -> list[GameState]:
     return bank
 
 
+# Vetted spawn locations — pulled from learnings/walking.md, combat.md, fishing.md, etc.
+SPAWN_LOCATIONS: list[tuple[int, int]] = [
+    (3222, 3218),  # Lumbridge castle courtyard
+    (3200, 3220),  # Lumbridge trees (woodcutting.md)
+    (3240, 3220),  # Lumbridge goblins (combat.md)
+    (3253, 3290),  # Lumbridge cow field center (combat.md)
+    (3237, 3295),  # Lumbridge chickens (combat.md)
+    (3087, 3230),  # Draynor fishing (fishing.md)
+    (3285, 3365),  # SE Varrock mine (mining.md)
+    (3212, 3247),  # Lumbridge general store (walking.md)
+]
+
+
+def random_starting_state(rng: random.Random) -> GameState:
+    """Randomize coordinates and skills, keep inventory from the prompt bank."""
+    base = rng.choice(STARTING_STATES).copy()
+    pos = rng.choice(SPAWN_LOCATIONS)
+    base.position = pos
+    base.world_position = pos
+
+    # Randomize skill levels (1-15) for any non-Hitpoints skills the base state has
+    for skill, xp in list(base.skills.items()):
+        if skill == "Hitpoints":
+            continue
+        level = rng.randint(1, 15)
+        base.skills[skill] = XP_FOR_LEVEL[level]
+
+    return base
+
+
 # ─── Reward ───────────────────────────────────────────────────────────────
 
 
@@ -272,6 +303,7 @@ def rollout_trajectory(
     temperature: float,
     device: torch.device,
     client: RSClient | None = None,
+    model_lock: threading.Lock | None = None,
     xp_multiplier: int = 1,
 ) -> Trajectory:
     """Roll out a plan-then-execute trajectory.
@@ -334,8 +366,14 @@ def rollout_trajectory(
     for _action_idx in range(max_actions):
         input_ids = torch.tensor([all_token_ids], device=device)
 
-        with torch.no_grad():
-            outputs = model.generate(input_ids, **generate_kwargs)
+        if model_lock is not None:
+            model_lock.acquire()
+        try:
+            with torch.no_grad():
+                outputs = model.generate(input_ids, **generate_kwargs)
+        finally:
+            if model_lock is not None:
+                model_lock.release()
 
         new_ids = outputs.sequences[0, len(all_token_ids) :]
         new_text = tokenizer.decode(new_ids, skip_special_tokens=False)

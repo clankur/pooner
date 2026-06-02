@@ -272,6 +272,19 @@ class BridgeClient(RSClient):
     def reset(self, initial_state: GameState | None = None) -> GameState:
         return self.get_state()
 
+    def send_admin_command(self, command: str) -> ActionResult:
+        """Send an admin command (::tele, ::setstat, etc.) via the bridge."""
+        cmd = {"type": "action", "name": "adminCommand", "arguments": {"command": command}}
+        self._send_command(cmd)
+        response = self._read_response()
+        if response is None:
+            return ActionResult(observation="Bridge communication error.", xp_gained={}, valid=False)
+        return ActionResult(
+            observation=response.get("observation", response.get("message", "")),
+            xp_gained={},
+            valid=response.get("success", False),
+        )
+
     @property
     def is_running(self) -> bool:
         return self._process is not None and self._process.poll() is None
@@ -396,3 +409,81 @@ class BridgeClient(RSClient):
             in_combat=data.get("inCombat", False),
             in_game=data.get("inGame", False),
         )
+
+
+# ─── Parallel bot pool ────────────────────────────────────────────────────
+
+
+class BridgeClientPool:
+    """Pool of K BridgeClient instances for parallel rollouts.
+
+    Each client connects as a separate named bot (grpobot1..grpobotN).
+    Admin commands reset each bot in-place between rollout groups without
+    disconnecting, avoiding the reconnect latency of a full reset.
+    """
+
+    def __init__(
+        self,
+        num_clients: int,
+        gateway_url: str = "ws://localhost:7780",
+        bot_prefix: str = "grpobot",
+        bridge_dir: str | None = None,
+    ) -> None:
+        self.clients: list[BridgeClient] = [
+            BridgeClient(
+                gateway_url=gateway_url,
+                bot_username=f"{bot_prefix}{i}",
+                bot_password="",
+                bridge_dir=bridge_dir,
+            )
+            for i in range(1, num_clients + 1)
+        ]
+
+    def start_all(self) -> list[GameState]:
+        return [client.start() for client in self.clients]
+
+    def stop_all(self) -> None:
+        for client in self.clients:
+            try:
+                client.stop()
+            except Exception:
+                logger.exception("Failed to stop %s", client.bot_username)
+
+    def reset_all(self, target_state: GameState) -> list[GameState]:
+        """Reset all bots to match target_state using admin commands.
+
+        Sends ::tele, ::minme, ::setstat, and ::give commands to each bot
+        to synchronize their state with the target without disconnecting.
+        """
+        return [self._admin_reset(client, target_state) for client in self.clients]
+
+    def _admin_reset(self, client: BridgeClient, target: GameState) -> GameState:
+        """Reset a single bot to match target state via admin commands."""
+        from rsenv.state import ALL_SKILLS, xp_to_level
+
+        # Teleport to target position using tile coordinates
+        x, z = target.position
+        client.send_admin_command(f"::tele 0,{x // 64},{z // 64},{x % 64},{z % 64}")
+
+        # Reset all skills to 1 (10 for Hitpoints), then set target levels above baseline
+        client.send_admin_command("::minme")
+        for skill_name in ALL_SKILLS:
+            target_xp = target.skills.get(skill_name, 0)
+            if target_xp > 0:
+                level = xp_to_level(target_xp)
+                baseline = 10 if skill_name == "Hitpoints" else 1
+                if level > baseline:
+                    client.send_admin_command(f"::setstat {skill_name} {level}")
+
+        # Give inventory items
+        for slot in target.inventory_slots:
+            if slot.name:
+                client.send_admin_command(f"::give {slot.name} {slot.count}")
+
+        return client.get_state()
+
+    def __len__(self) -> int:
+        return len(self.clients)
+
+    def __getitem__(self, idx: int) -> BridgeClient:
+        return self.clients[idx]

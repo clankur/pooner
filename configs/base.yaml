@@ -25,6 +25,7 @@ env:
   gateway_url: "ws://localhost:7780"
   bot_username: "grpobot1"
   bot_password: ""
+  num_bots: 8
   xp_multiplier: 1
 
 paths:
