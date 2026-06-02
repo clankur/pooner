@@ -240,6 +240,9 @@ def random_starting_state(rng: random.Random) -> GameState:
 
 
 _ACTION_DECAY = 0.97
+# TODO: try sigmoid normalization (1/(1+exp(-reward))) if min-max causes issues
+_REWARD_MIN = -2.0
+_REWARD_MAX = 10.0
 
 
 def compute_reward(
@@ -287,6 +290,8 @@ def compute_reward(
             reward += 0.1 * min(tokens_per_action, 100) / 100
         else:
             reward -= 0.3 * min((tokens_per_action - 150) / 500, 1.0)
+
+    reward = max(0.0, min(1.0, (reward - _REWARD_MIN) / (_REWARD_MAX - _REWARD_MIN)))
 
     return reward, num_level_ups
 
