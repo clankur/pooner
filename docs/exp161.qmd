@@ -35,6 +35,9 @@ Qwen3.5-0.8B earns 956 XP on a live 2004 RuneScape server in step 0. After one G
 
 The run was cancelled after step 7 (22 minutes).
 
+**tldr** - tune your hyperpatameters, this follows worst practices for RL. This is documenting amusing behavior as a result. 
+
+
 ## Setup
 
 Qwen3.5-0.8B base on the LostCity Runecape server via [rs-sdk](https://github.com/misterhat/rs-sdk). Game state is rendered as XML with `ElementTree`. Tool calls use the Qwen3.5 XML format, parsed by an adapter of vLLM's `qwen3_coder` parser.
