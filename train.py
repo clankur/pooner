@@ -280,7 +280,8 @@ def build_lr_scheduler(
 
     def lr_lambda(step: int) -> float:
         if step < warmup:
-            return (step + 1) / max(warmup, 1)
+            frac = (step + 1) / max(warmup, 1)
+            return min_ratio + (1.0 - min_ratio) * frac
         progress = (step - warmup) / max(total - warmup, 1)
         return min_ratio + (1.0 - min_ratio) * 0.5 * (1.0 + math.cos(math.pi * progress))
 
@@ -450,7 +451,7 @@ def train(config: Config) -> None:
             epoch_kl.append(kl_accum)
 
         current_lr = scheduler.get_last_lr()[0]
-        scheduler.step()
+        scheduler.step()  # tracks GRPO outer steps, not inner update epochs
 
         # ── 5. Log metrics ──
         rewards = torch.tensor(group.rewards)
