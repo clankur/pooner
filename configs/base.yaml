@@ -1,7 +1,7 @@
 model:
   model_name_or_path: "Qwen/Qwen3.5-4B"
   quantize_int4: true
-  max_new_tokens: 8192
+  max_new_tokens: 2048
   temperature: 0.8
 
 grpo:
@@ -23,6 +23,7 @@ env:
   gateway_url: "ws://localhost:7780"
   bot_username: "grpobot1"
   bot_password: ""
+  xp_multiplier: 1
 
 paths:
   root_working_dir: "/tmp"
