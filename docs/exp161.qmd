@@ -5,6 +5,8 @@ date: 2026-06-01
 categories: [training, failure, grpo]
 ---
 
+![](lostcity.jpg)
+
 ```{python}
 #| echo: false
 import plotly.graph_objects as go
@@ -33,10 +35,7 @@ colors = {
 
 Qwen3.5-0.8B earns 956 XP on a live 2004 RuneScape server in step 0. After one GRPO update, the model produces zero tool calls for all subsequent steps. Reward drops from 10.27 to -1.0 and stays there. Loss and KL flatline at zero — no gradient signal remains to recover. All rollouts degenerate, generating 2048 tokens of `"Let me mine the rock"`.
 
-The run was cancelled after step 7 (22 minutes).
-
-**tldr** - tune your hyperpatameters, this follows worst practices for RL. This is documenting amusing behavior as a result. 
-
+The run was a smoke test to verify my training loop before sweeping for hyperparameters. There was no expectation of a good run, though it ended up collapsing in an amusing way.
 
 ## Setup
 
@@ -53,7 +52,6 @@ grpo:
   learning_rate: 3e-5   # <3>
 env:
   max_actions: 5
-  use_heuristic_reward: false
 ```
 
 1. Reduced from 4 to fit in 24GB VRAM on RTX 4090
@@ -238,8 +236,6 @@ The failure mode is self-reinforcing. Once the model stops producing tool calls,
 | Quantization | none | int4 weights to free VRAM for KL + larger groups |
 | Post-training | none | SFT on successful trajectories before GRPO |
 | Accelerator | RTX 4090 (24GB) | taking offers :) |
-
-If int4 quantization is insufficient to fit KL + larger groups on 24GB, LoRA is the fallback — fewer trainable parameters, lower memory footprint.
 
 ---
 
