@@ -9,6 +9,6 @@ model:
   quantize_int4: true
 
 grpo:
-  learning_rate: 5.e-6
+  lr_max: 5.e-6
   log_interval: 10
   checkpoint_interval: 200

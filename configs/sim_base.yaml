@@ -10,7 +10,7 @@ model:
 
 grpo:
   group_size: 8
-  learning_rate: 1.e-5
+  lr_max: 1.e-5
   max_steps: 5000
   log_interval: 5
   checkpoint_interval: 100

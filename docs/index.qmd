@@ -6,4 +6,4 @@ Experiment reports from [pooner](https://github.com/clankur/pooner), a GRPO trai
 
 | Report | Summary |
 |--------|---------|
-| [LLMs yearn for the mines](exp161.qmd) | Mode collapse in one gradient step |
+| [LLMs yearn for the mines](exp161.qmd) | Exp 161: mode collapse in one gradient step — no KL, high LR, group_size=2 |

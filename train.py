@@ -40,7 +40,7 @@ class GRPOConfig:
     group_size: int = 8
     clip_epsilon: float = 0.2
     kl_coeff: float = 0.05
-    learning_rate: float = 1e-5
+    lr_max: float = 1e-5
     lr_min: float = 1e-6
     warmup_steps: int = 10
     max_grad_norm: float = 1.0
@@ -274,7 +274,7 @@ def build_lr_scheduler(
     """Linear warmup for warmup_steps, then cosine decay to lr_min over remaining steps."""
     warmup = grpo_config.warmup_steps
     total = grpo_config.max_steps
-    lr_max = grpo_config.learning_rate
+    lr_max = grpo_config.lr_max
     lr_min = grpo_config.lr_min
     min_ratio = lr_min / lr_max if lr_max > 0 else 0.0
 
@@ -347,7 +347,7 @@ def train(config: Config) -> None:
 
     optimizer = torch.optim.AdamW(
         [p for p in model.parameters() if p.requires_grad],
-        lr=config.grpo.learning_rate,
+        lr=config.grpo.lr_max,
     )
     scheduler = build_lr_scheduler(optimizer, config.grpo)
 
@@ -451,7 +451,7 @@ def train(config: Config) -> None:
             epoch_kl.append(kl_accum)
 
         current_lr = scheduler.get_last_lr()[0]
-        scheduler.step()  # tracks GRPO outer steps, not inner update epochs
+        scheduler.step()
 
         # ── 5. Log metrics ──
         rewards = torch.tensor(group.rewards)
