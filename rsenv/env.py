@@ -220,22 +220,20 @@ def compute_reward(
     initial_position: tuple[int, int],
     final_position: tuple[int, int],
     total_gen_tokens: int,
-    action_xp_history: list[tuple[str, dict[str, float]]] | None = None,
+    action_xp_history: list[tuple[str, dict[str, float]]],
+    xp_multiplier: int = 1,
 ) -> tuple[float, int]:
     """Compute trajectory reward. Returns (reward, num_level_ups)."""
     reward = 0.0
 
     # 1. XP reward with per-action-type exponential decay
-    if action_xp_history:
-        effective_xp = 0.0
-        action_counts: dict[str, int] = {}
-        for action_name, xp in action_xp_history:
-            n = action_counts.get(action_name, 0)
-            effective_xp += sum(xp.values()) * _ACTION_DECAY**n
-            action_counts[action_name] = n + 1
-        reward += effective_xp / 100.0
-    else:
-        reward += total_xp_gained / 100.0
+    effective_xp = 0.0
+    action_counts: dict[str, int] = {}
+    for action_name, xp in action_xp_history:
+        n = action_counts.get(action_name, 0)
+        effective_xp += sum(xp.values()) / xp_multiplier * _ACTION_DECAY**n
+        action_counts[action_name] = n + 1
+    reward += effective_xp / 100.0
 
     # 2. Level-up bonus
     num_level_ups = sum(
@@ -274,6 +272,7 @@ def rollout_trajectory(
     temperature: float,
     device: torch.device,
     client: RSClient | None = None,
+    xp_multiplier: int = 1,
 ) -> Trajectory:
     """Roll out a plan-then-execute trajectory.
 
@@ -409,6 +408,7 @@ def rollout_trajectory(
         final_position=state.world_position,
         total_gen_tokens=total_gen_tokens,
         action_xp_history=action_xp_history,
+        xp_multiplier=xp_multiplier,
     )
 
     return Trajectory(

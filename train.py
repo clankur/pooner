@@ -56,6 +56,7 @@ class EnvConfig:
     gateway_url: str = "ws://localhost:7780"
     bot_username: str = "grpo_agent"
     bot_password: str = ""
+    xp_multiplier: int = 1
 
 
 @dataclass(frozen=True)
@@ -366,6 +367,7 @@ def train(config: Config) -> None:
                 temperature=config.model.temperature,
                 device=device,
                 client=client,
+                xp_multiplier=config.env.xp_multiplier,
             )
             trajectories.append(traj)
 
