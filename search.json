@@ -7,18 +7,11 @@
     "text": "Experiment reports from pooner, a GRPO training codebase for teaching a small LLM to play RuneScape.\n\n\n\nReport\nSummary\n\n\n\n\nLLMs yearn for the mines\nMode collapse in one gradient step"
   },
   {
-    "objectID": "exp161.html",
-    "href": "exp161.html",
-    "title": "LLMs yearn for the mines",
-    "section": "",
-    "text": "Qwen3.5-0.8B earns 956 XP on a live 2004 RuneScape server in step 0. After one GRPO update, the model produces zero tool calls for all subsequent steps. Reward drops from 10.27 to -1.0 and stays there. Loss and KL flatline at zero — no gradient signal remains to recover. All rollouts degenerate, generating 2048 tokens of \"Let me mine the rock\".\nThe run was a smoke test to verify my training loop before sweeping for hyperparameters. There was no expectation of a good run, though it ended up collapsing in an amusing way."
-  },
-  {
     "objectID": "exp161.html#result",
     "href": "exp161.html#result",
     "title": "LLMs yearn for the mines",
-    "section": "",
-    "text": "Qwen3.5-0.8B earns 956 XP on a live 2004 RuneScape server in step 0. After one GRPO update, the model produces zero tool calls for all subsequent steps. Reward drops from 10.27 to -1.0 and stays there. Loss and KL flatline at zero — no gradient signal remains to recover. All rollouts degenerate, generating 2048 tokens of \"Let me mine the rock\".\nThe run was a smoke test to verify my training loop before sweeping for hyperparameters. There was no expectation of a good run, though it ended up collapsing in an amusing way."
+    "section": "Result",
+    "text": "Result\nQwen3.5-0.8B earns 956 XP on a live 2004 RuneScape server in step 0. After one GRPO update, the model produces zero tool calls for all subsequent steps. Reward drops from 10.27 to -1.0 and stays there. Loss and KL flatline at zero — no gradient signal remains to recover. All rollouts degenerate, generating 2048 tokens of \"Let me mine the rock\".\nThe run was a smoke test to verify my training loop before sweeping for hyperparameters. There was no expectation of a good run, though it ended up collapsing in an amusing way."
   },
   {
     "objectID": "exp161.html#setup",
