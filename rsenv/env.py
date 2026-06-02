@@ -208,6 +208,9 @@ def load_prompt_bank(seed: int = 42) -> list[GameState]:
 # ─── Reward ───────────────────────────────────────────────────────────────
 
 
+_ACTION_DECAY = 0.97
+
+
 def compute_reward(
     total_xp_gained: int,
     num_actions: int,
@@ -217,12 +220,22 @@ def compute_reward(
     initial_position: tuple[int, int],
     final_position: tuple[int, int],
     total_gen_tokens: int,
+    action_xp_history: list[tuple[str, dict[str, float]]] | None = None,
 ) -> tuple[float, int]:
     """Compute trajectory reward. Returns (reward, num_level_ups)."""
     reward = 0.0
 
-    # 1. XP reward (primary signal)
-    reward += total_xp_gained / 100.0
+    # 1. XP reward with per-action-type exponential decay
+    if action_xp_history:
+        effective_xp = 0.0
+        action_counts: dict[str, int] = {}
+        for action_name, xp in action_xp_history:
+            n = action_counts.get(action_name, 0)
+            effective_xp += sum(xp.values()) * _ACTION_DECAY**n
+            action_counts[action_name] = n + 1
+        reward += effective_xp / 100.0
+    else:
+        reward += total_xp_gained / 100.0
 
     # 2. Level-up bonus
     num_level_ups = sum(
@@ -305,6 +318,7 @@ def rollout_trajectory(
     num_actions = 0
     num_valid = 0
     total_gen_tokens = 0
+    action_xp_history: list[tuple[str, dict[str, float]]] = []
     _logged_first = False
 
     generate_kwargs: dict = {
@@ -359,6 +373,7 @@ def rollout_trajectory(
 
             if result.valid:
                 num_valid += 1
+            action_xp_history.append((action_name, result.xp_gained))
 
             append_tool_call(messages, action_name, action_args, think_text)
             append_tool_response(messages, result.observation)
@@ -393,6 +408,7 @@ def rollout_trajectory(
         initial_position=initial_position,
         final_position=state.world_position,
         total_gen_tokens=total_gen_tokens,
+        action_xp_history=action_xp_history,
     )
 
     return Trajectory(

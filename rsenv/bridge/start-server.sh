@@ -33,7 +33,7 @@ echo "Starting LostCity game server..."
 
 # Start engine
 cd "$SDK_DIR/server/engine"
-bun run start > "$LOG_DIR/engine.log" 2>&1 &
+NODE_XPRATE=1 bun run start > "$LOG_DIR/engine.log" 2>&1 &
 ENGINE_PID=$!
 echo "  Engine started (PID $ENGINE_PID)"
 
