@@ -1,4 +1,4 @@
-# pooner
+# rooner
 
 GRPO-trained LLM agent for RuneScape on the [LostCity/2004scape](https://2004.lostcity.rs/) server.
 
