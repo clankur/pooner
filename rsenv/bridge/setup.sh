@@ -7,6 +7,16 @@ NUM_BOTS="${1:-8}"
 BRIDGE_DIR="$(cd "$(dirname "$0")" && pwd)"
 SDK_DIR="$BRIDGE_DIR/rs-sdk"
 
+# bun lives in ~/.bun/bin, absent from a non-interactive SSH PATH — same failure mode that
+# start-server.sh guards against. Without this, `bun install` below fails over SSH.
+if ! command -v bun >/dev/null 2>&1; then
+    export PATH="$HOME/.bun/bin:$PATH"
+fi
+if ! command -v bun >/dev/null 2>&1; then
+    echo "bun not found on PATH or in \$HOME/.bun/bin. Install bun (https://bun.sh) first." >&2
+    exit 1
+fi
+
 # Clone rs-sdk if needed
 if [ ! -d "$SDK_DIR" ]; then
     echo "Cloning rs-sdk..."
