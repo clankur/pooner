@@ -18,6 +18,7 @@ from dataclasses import asdict, dataclass
 import hydra
 import runq
 import torch
+import torch.nn.functional as F
 import wandb
 from einops import rearrange
 from omegaconf import DictConfig, OmegaConf
@@ -183,6 +184,41 @@ def get_per_token_logprobs(
     return torch.stack(all_lp)  # (B, L-1)
 
 
+def get_token_logprobs_training(
+    model: Qwen3_5ForConditionalGeneration,
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    target_ids: torch.Tensor,
+) -> torch.Tensor:
+    """Memory-efficient per-token log-probs for the backward pass.
+
+    Checkpoints the lm_head → cross_entropy computation so the full (L-1, V)
+    logits tensor is freed after forward and recomputed during backward.
+    F.cross_entropy backward avoids a second (L-1, V) allocation.
+
+    Args:
+        input_ids: (1, L)
+        attention_mask: (1, L)
+        target_ids: (L-1,) target token ids
+
+    Returns:
+        (L-1,) log-probs with gradients attached
+    """
+    hidden = model.model(input_ids=input_ids, attention_mask=attention_mask)[0]
+    hidden = hidden[0, :-1, :]  # (L-1, H)
+
+    def _lm_head_logprobs(h: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        logits = model.lm_head(h)
+        return -F.cross_entropy(logits, targets, reduction="none")
+
+    return torch.utils.checkpoint.checkpoint(
+        _lm_head_logprobs,
+        hidden,
+        target_ids,
+        use_reentrant=False,
+    )
+
+
 # ─── GRPO loss ─────────────────────────────────────────────────────────────
 
 
@@ -312,6 +348,7 @@ class StepMetrics:
     group_std_reward: float
     group_min_reward: float
     group_max_reward: float
+    reward_components: dict[str, float]  # group mean of each compute_reward component
     group_mean_xp: float
     mean_actions: float
     mean_valid_actions: float
@@ -481,10 +518,8 @@ def train(config: Config) -> None:
             for b in range(K):
                 ids_b = rearrange(group.full_ids[b], "l -> 1 l")
                 mask_b = rearrange(group.attention_mask[b], "l -> 1 l")
-                logits_b = model(input_ids=ids_b, attention_mask=mask_b).logits[0, :-1, :]
                 targets_b = group.full_ids[b, 1:]
-                target_logits = logits_b.gather(dim=-1, index=rearrange(targets_b, "l -> l 1")).squeeze(-1)
-                new_lp_b = target_logits - torch.logsumexp(logits_b, dim=-1)
+                new_lp_b = get_token_logprobs_training(model, ids_b, mask_b, targets_b)
 
                 total_b, p_b, kl_b = grpo_loss(
                     new_log_probs=rearrange(new_lp_b, "l -> 1 l"),
@@ -513,6 +548,10 @@ def train(config: Config) -> None:
         # ── 5. Log metrics ──
         rewards = torch.tensor(group.rewards)
         total_actions_sum = sum(t.num_actions for t in trajectories)
+        reward_components = {
+            name: sum(t.reward_metrics[name] for t in trajectories) / len(trajectories)
+            for name in trajectories[0].reward_metrics
+        }
         metrics = StepMetrics(
             step=step,
             learning_rate=current_lr,
@@ -520,13 +559,12 @@ def train(config: Config) -> None:
             group_std_reward=rewards.std().item(),
             group_min_reward=rewards.min().item(),
             group_max_reward=rewards.max().item(),
+            reward_components=reward_components,
             group_mean_xp=sum(t.total_xp for t in trajectories) / len(trajectories),
             mean_actions=total_actions_sum / len(trajectories),
             mean_valid_actions=sum(t.num_valid_actions for t in trajectories) / len(trajectories),
             mean_level_ups=sum(t.num_level_ups for t in trajectories) / len(trajectories),
-            mean_tokens_per_action=(
-                sum(t.total_gen_tokens for t in trajectories) / max(total_actions_sum, 1)
-            ),
+            mean_tokens_per_action=(sum(t.total_gen_tokens for t in trajectories) / max(total_actions_sum, 1)),
             idle_count=sum(1 for t in trajectories if t.total_xp == 0 and t.num_actions > 0),
             policy_loss=sum(epoch_policy) / len(epoch_policy),
             kl_loss=sum(epoch_kl) / len(epoch_kl),
@@ -536,34 +574,25 @@ def train(config: Config) -> None:
         metrics_log.append(metrics)
 
         if step % config.grpo.log_interval == 0:
-            print(
-                f"[Step {step:>4d}] "
-                f"reward={metrics.group_mean_reward:>6.2f} "
-                f"xp={metrics.group_mean_xp:>6.1f} "
-                f"actions={metrics.mean_actions:>4.1f}/{metrics.mean_valid_actions:>4.1f} "
-                f"loss={metrics.total_loss:>8.4f} "
-                f"kl={metrics.kl_loss:>7.4f} "
-                f"lr={metrics.learning_rate:.2e} "
-                f"t={metrics.elapsed_sec:>6.1f}s",
-                flush=True,
-            )
-            wandb.log(
-                {
-                    "group_mean_reward": metrics.group_mean_reward,
-                    "group_std_reward": metrics.group_std_reward,
-                    "group_mean_xp": metrics.group_mean_xp,
-                    "mean_actions": metrics.mean_actions,
-                    "mean_valid_actions": metrics.mean_valid_actions,
-                    "mean_level_ups": metrics.mean_level_ups,
-                    "mean_tokens_per_action": metrics.mean_tokens_per_action,
-                    "idle_count": metrics.idle_count,
-                    "policy_loss": metrics.policy_loss,
-                    "kl_loss": metrics.kl_loss,
-                    "total_loss": metrics.total_loss,
-                    "learning_rate": metrics.learning_rate,
-                },
-                step=step,
-            )
+            log_dict = {
+                "group_mean_reward": metrics.group_mean_reward,
+                "group_std_reward": metrics.group_std_reward,
+                "group_mean_xp": metrics.group_mean_xp,
+                "mean_actions": metrics.mean_actions,
+                "mean_valid_actions": metrics.mean_valid_actions,
+                "mean_level_ups": metrics.mean_level_ups,
+                "mean_tokens_per_action": metrics.mean_tokens_per_action,
+                "idle_count": metrics.idle_count,
+                "policy_loss": metrics.policy_loss,
+                "kl_loss": metrics.kl_loss,
+                "total_loss": metrics.total_loss,
+                "learning_rate": metrics.learning_rate,
+                "elapsed_sec": metrics.elapsed_sec,
+                **{f"reward/{name}": value for name, value in metrics.reward_components.items()},
+            }
+            printable = {name: round(value, 4) for name, value in log_dict.items()}
+            print(f"[Step {step:>4d}] {printable}", flush=True)
+            wandb.log(log_dict, step=step)
 
         if config.grpo.checkpoint_interval > 0 and step > 0 and step % config.grpo.checkpoint_interval == 0:
             ckpt_path = os.path.join(model_dir, f"checkpoint_{step}.pt")

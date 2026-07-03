@@ -31,9 +31,13 @@ fi
 
 echo "Starting LostCity game server..."
 
-# Start engine
+# Start engine. NODE_DEBUG_SOCKET=true switches the server into its "relaxed for
+# bots" mode (World.ts): the no-connection/no-response logout timeouts jump from
+# 500/1000 ticks to 60000, so bots aren't idle-kicked back to the default spawn
+# while they wait their turn on the shared GPU during a rollout (which silently
+# undid every skilling teleport and pinned XP at 0 — see exp 219).
 cd "$SDK_DIR/server/engine"
-NODE_XPRATE="${XP_MULTIPLIER:-1}" bun run start > "$LOG_DIR/engine.log" 2>&1 &
+NODE_XPRATE="${XP_MULTIPLIER:-1}" NODE_DEBUG_SOCKET=true bun run start > "$LOG_DIR/engine.log" 2>&1 &
 ENGINE_PID=$!
 echo "  Engine started (PID $ENGINE_PID)"
 
