@@ -32,6 +32,7 @@ from rsenv import (
     random_starting_state,
     rollout_trajectory,
 )
+from rsenv.logprobs import per_token_logprobs
 
 logging.basicConfig(level=logging.INFO, format="%(name)s: %(message)s")
 
@@ -169,18 +170,9 @@ def get_per_token_logprobs(
     Returns:
         (B, L-1) log-probs for tokens at positions 1..L-1
     """
-    # Process one sample at a time to avoid materializing (B, L, V) softmax
-    all_lp = []
-    for b in range(input_ids.shape[0]):
-        ids_b = rearrange(input_ids[b], "l -> 1 l")
-        mask_b = rearrange(attention_mask[b], "l -> 1 l")
-        logits_b = model(input_ids=ids_b, attention_mask=mask_b).logits[0, :-1, :]  # (L-1, V)
-        targets_b = input_ids[b, 1:]  # (L-1,)
-        # log_prob = logit[target] - logsumexp(logits) — avoids full softmax allocation
-        target_logits = logits_b.gather(dim=-1, index=rearrange(targets_b, "l -> l 1")).squeeze(-1)  # (L-1,)
-        lse = torch.logsumexp(logits_b, dim=-1)  # (L-1,)
-        all_lp.append(target_logits - lse)
-    return torch.stack(all_lp)  # (B, L-1)
+    # Chunked vocab projection: peak logits memory is O(chunk * vocab),
+    # independent of L. See rsenv/logprobs.py.
+    return per_token_logprobs(model, input_ids, attention_mask)
 
 
 # ─── GRPO loss ─────────────────────────────────────────────────────────────
@@ -481,10 +473,7 @@ def train(config: Config) -> None:
             for b in range(K):
                 ids_b = rearrange(group.full_ids[b], "l -> 1 l")
                 mask_b = rearrange(group.attention_mask[b], "l -> 1 l")
-                logits_b = model(input_ids=ids_b, attention_mask=mask_b).logits[0, :-1, :]
-                targets_b = group.full_ids[b, 1:]
-                target_logits = logits_b.gather(dim=-1, index=rearrange(targets_b, "l -> l 1")).squeeze(-1)
-                new_lp_b = target_logits - torch.logsumexp(logits_b, dim=-1)
+                new_lp_b = per_token_logprobs(model, ids_b, mask_b)[0]
 
                 total_b, p_b, kl_b = grpo_loss(
                     new_log_probs=rearrange(new_lp_b, "l -> 1 l"),
@@ -524,9 +513,7 @@ def train(config: Config) -> None:
             mean_actions=total_actions_sum / len(trajectories),
             mean_valid_actions=sum(t.num_valid_actions for t in trajectories) / len(trajectories),
             mean_level_ups=sum(t.num_level_ups for t in trajectories) / len(trajectories),
-            mean_tokens_per_action=(
-                sum(t.total_gen_tokens for t in trajectories) / max(total_actions_sum, 1)
-            ),
+            mean_tokens_per_action=(sum(t.total_gen_tokens for t in trajectories) / max(total_actions_sum, 1)),
             idle_count=sum(1 for t in trajectories if t.total_xp == 0 and t.num_actions > 0),
             policy_loss=sum(epoch_policy) / len(epoch_policy),
             kl_loss=sum(epoch_kl) / len(epoch_kl),
