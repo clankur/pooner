@@ -44,6 +44,7 @@ class ModelConfig:
     quantize_int4: bool = True
     max_new_tokens: int = 512
     temperature: float = 0.8
+    fp8_kv_cache: bool = False  # store generation KV cache in fp8 (K: e4m3, V: e5m2)
 
 
 @dataclass(frozen=True)
@@ -322,6 +323,20 @@ class StepMetrics:
     kl_loss: float
     total_loss: float
     elapsed_sec: float
+    gen_peak_mem_gb: float = 0.0  # peak CUDA allocation during rollout generation
+    train_peak_mem_gb: float = 0.0  # peak CUDA allocation during the GRPO update
+
+
+def _reset_peak_mem(device: torch.device) -> None:
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats()
+
+
+def _peak_mem_gb(device: torch.device) -> float:
+    """Peak CUDA bytes allocated since the last reset, in GB (0 on CPU)."""
+    if device.type != "cuda":
+        return 0.0
+    return torch.cuda.max_memory_allocated() / 1e9
 
 
 def _report_wandb_url_to_runq(wandb_url: str | None) -> None:
@@ -413,6 +428,8 @@ def train(config: Config) -> None:
         # ── 1. Roll out K trajectories ──
         trajectories: list[Trajectory] = []
 
+        _reset_peak_mem(device)  # measure generation-phase peak
+
         if client_pool is not None:
             # Randomize starting state for variance across steps
             reset_target = random_starting_state(state_rng)
@@ -432,6 +449,7 @@ def train(config: Config) -> None:
                     client=client_pool[k],
                     model_lock=model_lock,
                     xp_multiplier=config.env.xp_multiplier,
+                    fp8_kv_cache=config.model.fp8_kv_cache,
                 )
 
             with ThreadPoolExecutor(max_workers=K) as executor:
@@ -449,11 +467,15 @@ def train(config: Config) -> None:
                     device=device,
                     client=client,
                     xp_multiplier=config.env.xp_multiplier,
+                    fp8_kv_cache=config.model.fp8_kv_cache,
                 )
                 trajectories.append(traj)
 
+        gen_peak_mem_gb = _peak_mem_gb(device)
+
         # Free generation KV cache before training
         torch.cuda.empty_cache() if device.type == "cuda" else None
+        _reset_peak_mem(device)  # measure training-phase peak (collate + logprobs + update)
 
         # ── 2. Collate + compute advantages ──
         group = collate_trajectories(trajectories, ref_model, device)
@@ -507,6 +529,8 @@ def train(config: Config) -> None:
             epoch_policy.append(policy_accum)
             epoch_kl.append(kl_accum)
 
+        train_peak_mem_gb = _peak_mem_gb(device)
+
         current_lr = scheduler.get_last_lr()[0]
         scheduler.step()
 
@@ -524,14 +548,14 @@ def train(config: Config) -> None:
             mean_actions=total_actions_sum / len(trajectories),
             mean_valid_actions=sum(t.num_valid_actions for t in trajectories) / len(trajectories),
             mean_level_ups=sum(t.num_level_ups for t in trajectories) / len(trajectories),
-            mean_tokens_per_action=(
-                sum(t.total_gen_tokens for t in trajectories) / max(total_actions_sum, 1)
-            ),
+            mean_tokens_per_action=(sum(t.total_gen_tokens for t in trajectories) / max(total_actions_sum, 1)),
             idle_count=sum(1 for t in trajectories if t.total_xp == 0 and t.num_actions > 0),
             policy_loss=sum(epoch_policy) / len(epoch_policy),
             kl_loss=sum(epoch_kl) / len(epoch_kl),
             total_loss=sum(epoch_losses) / len(epoch_losses),
             elapsed_sec=time.time() - t_start,
+            gen_peak_mem_gb=gen_peak_mem_gb,
+            train_peak_mem_gb=train_peak_mem_gb,
         )
         metrics_log.append(metrics)
 
@@ -544,6 +568,7 @@ def train(config: Config) -> None:
                 f"loss={metrics.total_loss:>8.4f} "
                 f"kl={metrics.kl_loss:>7.4f} "
                 f"lr={metrics.learning_rate:.2e} "
+                f"mem(gen/train)={metrics.gen_peak_mem_gb:>4.1f}/{metrics.train_peak_mem_gb:>4.1f}GB "
                 f"t={metrics.elapsed_sec:>6.1f}s",
                 flush=True,
             )
@@ -561,6 +586,8 @@ def train(config: Config) -> None:
                     "kl_loss": metrics.kl_loss,
                     "total_loss": metrics.total_loss,
                     "learning_rate": metrics.learning_rate,
+                    "gen_peak_mem_gb": metrics.gen_peak_mem_gb,
+                    "train_peak_mem_gb": metrics.train_peak_mem_gb,
                 },
                 step=step,
             )

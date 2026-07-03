@@ -3,6 +3,7 @@ model:
   quantize_int4: true
   max_new_tokens: 2048
   temperature: 0.8
+  fp8_kv_cache: false  # store generation KV cache in fp8 (K: e4m3, V: e5m2) to cut rollout peak memory
 
 grpo:
   group_size: 8
