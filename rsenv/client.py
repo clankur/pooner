@@ -475,21 +475,18 @@ class BridgeClientPool:
                 if level > baseline:
                     client.send_admin_command(f"::setstat {skill_name} {level}")
 
-        # Give inventory items, topping up to the target counts. Top-up (not
-        # blind re-give) matters because tools don't stack: re-handing the
-        # 5-item kit every reset would fill the 28 slots with duplicate
-        # axes/swords within a few resets and stall skilling. We give only the
-        # deficit between what the bot already holds and the target.
-        current = client.get_state()
-        held = current.get_inventory()
+        # Reset inventory to exactly the target. ::minme/::tele/::give never
+        # clear the pack, so items the bot gathered or produced during the
+        # previous rollout (logs, ore, cooked food, arrow shafts) otherwise
+        # survive the reset, accumulate across rollouts, eventually fill all 28
+        # slots, and stall skilling ("Inventory full!"). Wipe first, then hand
+        # over the full kit once — no per-tool duplication either, since the
+        # pack is empty when we give.
+        client.send_admin_command("::clearinv")
         for name, count in target.get_inventory().items():
-            deficit = count - held.get(name, 0)
-            if deficit > 0:
-                client.send_admin_command(f"::give {name} {deficit}")
+            client.send_admin_command(f"::give {name} {count}")
 
-        # `current` predates the gives above, but every caller discards this
-        # return and re-fetches at rollout start, so we skip a second round-trip.
-        return current
+        return client.get_state()
 
     def __len__(self) -> int:
         return len(self.clients)

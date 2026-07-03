@@ -283,7 +283,17 @@ def random_starting_state(rng: random.Random) -> GameState:
 # ─── Reward ───────────────────────────────────────────────────────────────
 
 
-_ACTION_DECAY = 0.97
+@dataclass
+class RewardResult:
+    """Bundled return of compute_reward.
+
+    metrics maps each reward component to its contribution; `reward` is exactly
+    their sum, so wandb plots of the components explain the total.
+    """
+
+    reward: float
+    num_level_ups: int
+    metrics: dict[str, float]
 
 
 def compute_reward(
@@ -294,24 +304,14 @@ def compute_reward(
     final_skills: dict[str, int],
     initial_position: tuple[int, int],
     final_position: tuple[int, int],
-    total_gen_tokens: int,
     action_xp_history: list[tuple[str, dict[str, float]]],
     xp_multiplier: int = 1,
-) -> tuple[float, int, dict[str, float]]:
-    """Compute trajectory reward. Returns (reward, num_level_ups, reward_metrics).
-
-    reward_metrics maps each component to its contribution; the total reward
-    is exactly their sum, so wandb plots of the components explain the total.
-    """
+) -> RewardResult:
+    """Compute trajectory reward."""
     reward_metrics: dict[str, float] = {}
 
-    # 1. XP reward (per-action-type decay disabled for now)
-    effective_xp = 0.0
-    action_counts: dict[str, int] = {}
-    for action_name, xp in action_xp_history:
-        n = action_counts.get(action_name, 0)
-        effective_xp += sum(xp.values()) / xp_multiplier  # * _ACTION_DECAY**n
-        action_counts[action_name] = n + 1
+    # 1. XP reward
+    effective_xp = sum(sum(xp.values()) for _, xp in action_xp_history) / xp_multiplier
     reward_metrics["xp"] = effective_xp / 100.0
 
     # 2. Level-up bonus
@@ -323,9 +323,16 @@ def compute_reward(
     # 3. Per-action shaping. Exp 172 collapsed to emitting no tool calls:
     # attempting actions netted -1 to -2.3 while doing nothing scored exactly 0,
     # so the policy learned silence in 4 steps. Acting must strictly dominate
-    # inaction even before any XP flows, so valid actions earn a bonus and the
-    # invalid penalty is small enough that exploration survives it.
-    reward_metrics["valid_actions"] = 0.1 * num_valid
+    # inaction — but that guarantee comes from the no_actions floor below (a
+    # silent trajectory is -2.0, worse than the -0.5 worst acting case), not
+    # from the valid-action bonus. So the bonus only pays out when the
+    # trajectory made real progress (XP or a level-up); otherwise a run of
+    # valid-but-useless moves (e.g. 10 walkTo calls, all valid, zero XP) would
+    # earn net-positive reward and the policy could settle into a
+    # wander-for-reward local optimum. The invalid penalty stays small so
+    # exploration survives it.
+    made_progress = total_xp_gained > 0 or num_level_ups > 0
+    reward_metrics["valid_actions"] = 0.1 * num_valid if made_progress else 0.0
     reward_metrics["invalid_actions"] = -0.05 * (num_actions - num_valid)
 
     # 4. No-tool-call trajectory is the worst outcome — below the worst acting
@@ -333,16 +340,8 @@ def compute_reward(
     # have advantage pointing toward acting.
     reward_metrics["no_actions"] = -2.0 if num_actions == 0 else 0.0
 
-    # 5. Token efficiency: reward sweet spot, penalize excess
-    # if num_actions > 0:
-    #     tokens_per_action = total_gen_tokens / num_actions
-    #     if tokens_per_action <= 150:
-    #         reward_metrics["token_efficiency"] = 0.1 * min(tokens_per_action, 100) / 100
-    #     else:
-    #         reward_metrics["token_efficiency"] = -0.3 * min((tokens_per_action - 150) / 500, 1.0)
-
     reward = sum(reward_metrics.values())
-    return reward, num_level_ups, reward_metrics
+    return RewardResult(reward=reward, num_level_ups=num_level_ups, metrics=reward_metrics)
 
 
 # ─── Trajectory rollout ───────────────────────────────────────────────────
@@ -490,7 +489,7 @@ def rollout_trajectory(
 
     total_xp_gained = state.total_xp() - initial_xp
 
-    reward, num_level_ups, reward_metrics = compute_reward(
+    reward_result = compute_reward(
         total_xp_gained=total_xp_gained,
         num_actions=num_actions,
         num_valid=num_valid,
@@ -498,7 +497,6 @@ def rollout_trajectory(
         final_skills=state.skills,
         initial_position=initial_position,
         final_position=state.world_position,
-        total_gen_tokens=total_gen_tokens,
         action_xp_history=action_xp_history,
         xp_multiplier=xp_multiplier,
     )
@@ -508,12 +506,12 @@ def rollout_trajectory(
         full_ids=torch.tensor(all_token_ids),
         generation_mask=torch.tensor(gen_mask, dtype=torch.float32),
         old_log_probs=torch.tensor(model_log_probs),
-        total_reward=reward,
-        reward_metrics=reward_metrics,
+        total_reward=reward_result.reward,
+        reward_metrics=reward_result.metrics,
         total_xp=total_xp_gained,
         num_actions=num_actions,
         num_valid_actions=num_valid,
-        num_level_ups=num_level_ups,
+        num_level_ups=reward_result.num_level_ups,
         total_gen_tokens=total_gen_tokens,
         final_state=state,
     )
