@@ -10,6 +10,18 @@ LOG_DIR="$BRIDGE_DIR/logs"
 
 mkdir -p "$LOG_DIR"
 
+# bun installs to ~/.bun/bin, which is NOT on the PATH of a non-interactive SSH session
+# (e.g. `ssh fractal rsenv/bridge/start-server.sh`). Without this every `bun` call below
+# dies with "command not found" and the server silently never comes up — which is exactly
+# how the game env ended up down and broke live training runs.
+if ! command -v bun >/dev/null 2>&1; then
+    export PATH="$HOME/.bun/bin:$PATH"
+fi
+if ! command -v bun >/dev/null 2>&1; then
+    echo "bun not found on PATH or in \$HOME/.bun/bin. Install bun (https://bun.sh) first." >&2
+    exit 1
+fi
+
 if [ ! -d "$SDK_DIR/server" ]; then
     echo "rs-sdk not found. Run ./setup.sh first."
     exit 1
@@ -31,21 +43,26 @@ fi
 
 echo "Starting LostCity game server..."
 
+# nohup + </dev/null detaches each service from the controlling terminal so it survives the
+# SSH session closing. Plain `&` leaves them in the login shell's process group, which gets
+# SIGHUP'd (and killed) on disconnect — so a run started over SSH would die moments later.
+# nohup keeps $! pointing at the real process, so stop-server.sh's PID tracking still works.
+
 # Start engine
 cd "$SDK_DIR/server/engine"
-NODE_XPRATE="${XP_MULTIPLIER:-1}" bun run start > "$LOG_DIR/engine.log" 2>&1 &
+nohup env NODE_XPRATE="${XP_MULTIPLIER:-1}" bun run start > "$LOG_DIR/engine.log" 2>&1 </dev/null &
 ENGINE_PID=$!
 echo "  Engine started (PID $ENGINE_PID)"
 
 # Start webclient bundler
 cd "$SDK_DIR/server/webclient"
-bun run watch > "$LOG_DIR/webclient.log" 2>&1 &
+nohup bun run watch > "$LOG_DIR/webclient.log" 2>&1 </dev/null &
 WEBCLIENT_PID=$!
 echo "  Webclient started (PID $WEBCLIENT_PID)"
 
 # Start gateway
 cd "$SDK_DIR/server/gateway"
-bun run gateway > "$LOG_DIR/gateway.log" 2>&1 &
+nohup bun run gateway > "$LOG_DIR/gateway.log" 2>&1 </dev/null &
 GATEWAY_PID=$!
 echo "  Gateway started (PID $GATEWAY_PID)"
 
