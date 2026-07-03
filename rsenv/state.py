@@ -133,6 +133,22 @@ class GameState:
             return len(self.inventory_slots)
         return sum(self.inventory.values())
 
+    def get_inventory(self) -> dict[str, int]:
+        """Normalize inventory to name->count, summing duplicate slots.
+
+        GameState carries two representations: inventory_slots (populated from
+        the live game) and the simpler inventory dict (sim and spawn defs).
+        Callers that just need item counts should use this instead of branching
+        on which one is populated.
+        """
+        if self.inventory_slots:
+            items: dict[str, int] = {}
+            for slot in self.inventory_slots:
+                if slot.name:
+                    items[slot.name] = items.get(slot.name, 0) + slot.count
+            return items
+        return dict(self.inventory)
+
     def copy(self) -> "GameState":
         return GameState(
             tick=self.tick,
@@ -162,6 +178,7 @@ class Trajectory:
     generation_mask: torch.Tensor
     old_log_probs: torch.Tensor
     total_reward: float
+    reward_metrics: dict[str, float]
     total_xp: float
     num_actions: int
     num_valid_actions: int
