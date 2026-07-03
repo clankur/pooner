@@ -475,17 +475,26 @@ class BridgeClientPool:
                 if level > baseline:
                     client.send_admin_command(f"::setstat {skill_name} {level}")
 
-        # Reset inventory to exactly the target. ::minme/::tele/::give never
-        # clear the pack, so items the bot gathered or produced during the
-        # previous rollout (logs, ore, cooked food, arrow shafts) otherwise
-        # survive the reset, accumulate across rollouts, eventually fill all 28
-        # slots, and stall skilling ("Inventory full!"). Wipe first, then hand
-        # over the full kit once — no per-tool duplication either, since the
-        # pack is empty when we give.
-        client.send_admin_command("::clearinv")
+        # Top up inventory to the target counts, giving only the deficit between
+        # what the bot already holds and the target. Deficit (not blind re-give)
+        # matters because tools don't stack: re-handing the kit every reset would
+        # fill the 28 slots with duplicate axes/swords within a few resets and
+        # stall skilling.
+        #
+        # Known limitation: ::minme/::tele/::give never *clear* the pack, so
+        # non-kit items the bot produced last rollout (logs, ore, cooked food,
+        # arrow shafts) survive the reset and slowly accumulate. Fully clearing
+        # them needs an inventory-wipe admin command, which the LostCity engine
+        # does not expose (ClientCheatHandler has no `clearinv`; invClear is
+        # internal-only) — closing that gap requires a server-side cheat in the
+        # rs-sdk repo, out of scope here.
+        held = client.get_state().get_inventory()
         for name, count in target.get_inventory().items():
-            client.send_admin_command(f"::give {name} {count}")
+            deficit = count - held.get(name, 0)
+            if deficit > 0:
+                client.send_admin_command(f"::give {name} {deficit}")
 
+        # Return the post-give state so callers see the actual inventory.
         return client.get_state()
 
     def __len__(self) -> int:
