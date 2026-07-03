@@ -1,0 +1,16 @@
+# Live game training with Qwen3.5-4B, LoRA adapters on an FP8-quantized frozen base.
+# FP8 weight-only needs Ada sm_89+ (RTX 4090). The KL reference is the frozen base
+# (adapters disabled), so no separate reference model is loaded.
+# uv run python -m train --config-name=gpu_4090_live_lora ++paths.model_name=live_lora_4b_001
+defaults:
+  - live_base
+  - _self_
+
+model:
+  model_name_or_path: "Qwen/Qwen3.5-4B"
+  quantize_int4: false
+  quantize_fp8: true
+  use_lora: true
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.0

@@ -14,6 +14,7 @@ import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
+from typing import Callable
 
 import hydra
 import runq
@@ -23,6 +24,7 @@ from einops import rearrange
 from omegaconf import DictConfig, OmegaConf
 from transformers import AutoProcessor, Qwen3_5ForConditionalGeneration
 
+from lora import adapter_state_dict, adapters_disabled, apply_lora
 from rsenv import (
     BridgeClient,
     BridgeClientPool,
@@ -42,8 +44,23 @@ logging.basicConfig(level=logging.INFO, format="%(name)s: %(message)s")
 class ModelConfig:
     model_name_or_path: str = "Qwen/Qwen3-4B-Base"
     quantize_int4: bool = True
+    quantize_fp8: bool = False  # FP8 weight-only on the frozen base (Ada sm_89+, e.g. RTX 4090)
     max_new_tokens: int = 512
     temperature: float = 0.8
+    # LoRA: train low-rank adapters on a frozen base instead of full fine-tuning.
+    use_lora: bool = False
+    lora_r: int = 16
+    lora_alpha: int = 32
+    lora_dropout: float = 0.0
+    lora_target_modules: tuple[str, ...] = (
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "o_proj",
+        "gate_proj",
+        "up_proj",
+        "down_proj",
+    )
 
 
 @dataclass(frozen=True)
@@ -112,14 +129,39 @@ def load_model(config: ModelConfig, device: torch.device) -> tuple[Qwen3_5ForCon
         device_map={"": device} if device.type == "cuda" else None,
     )
 
+    if config.use_lora:
+        # Wrap BEFORE quantizing so adapters are created from the bf16 base (bf16 A/B params) and
+        # FP8 quantization then only touches the frozen base linears.
+        num_wrapped = apply_lora(
+            model,
+            r=config.lora_r,
+            alpha=config.lora_alpha,
+            dropout=config.lora_dropout,
+            target_modules=tuple(config.lora_target_modules),
+        )
+        print(f"LoRA: wrapped {num_wrapped} linear layers (r={config.lora_r}, alpha={config.lora_alpha})")
+
+    if device.type != "cuda":
+        model = model.to(device)
+
     if config.quantize_int4:
+        if config.use_lora:
+            # int4 here is Int4WeightOnlyQATQuantizer — quantization-aware *training* of all weights,
+            # which contradicts a frozen-base LoRA. Use quantize_fp8 (weight-only PTQ) instead.
+            raise ValueError("quantize_int4 (QAT) is incompatible with use_lora; use quantize_fp8 for a frozen base")
         from torchao.quantization.qat import Int4WeightOnlyQATQuantizer
 
         qat = Int4WeightOnlyQATQuantizer(groupsize=128)
         model = qat.prepare(model)
 
-    if device.type != "cuda":
-        model = model.to(device)
+    if config.quantize_fp8:
+        if device.type != "cuda":
+            raise ValueError("quantize_fp8 requires a CUDA device (Ada sm_89+ FP8 tensor cores)")
+        # Weight-only PTQ on the frozen base: ~half the bf16 footprint, bf16 activations/gradients so
+        # the graph reaches the (unquantized) adapters cleanly. A/B are Parameters, untouched by this.
+        from torchao.quantization import Float8WeightOnlyConfig, quantize_
+
+        quantize_(model, Float8WeightOnlyConfig())
 
     model.gradient_checkpointing_enable()
     return model, processor
@@ -150,6 +192,43 @@ def compute_ref_logprobs(
     ref_model.to("cpu")
     torch.cuda.empty_cache()
     return ref_lp  # stays on device
+
+
+RefLogProbFn = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
+
+
+def make_ref_logprob_fn(
+    model: Qwen3_5ForConditionalGeneration,
+    ref_model: Qwen3_5ForConditionalGeneration | None,
+    use_lora: bool,
+    kl_coeff: float,
+    device: torch.device,
+) -> RefLogProbFn | None:
+    """Build the KL reference log-prob function.
+
+    With LoRA the base policy is the reference: disable the adapters and run the same model, so no
+    separate frozen copy (and no CPU↔GPU swap) is needed. Without LoRA, fall back to the frozen
+    `ref_model`.
+    """
+    if kl_coeff <= 0:
+        return None
+
+    if use_lora:
+
+        def ref_via_base(input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+            # eval() so base dropout doesn't perturb the reference; the loop re-sets train/eval after.
+            model.eval()
+            with torch.no_grad(), adapters_disabled(model):
+                return get_per_token_logprobs(model, input_ids, attention_mask)
+
+        return ref_via_base
+
+    assert ref_model is not None, "kl_coeff>0 without LoRA requires a reference model"
+
+    def ref_via_frozen(input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+        return compute_ref_logprobs(ref_model, input_ids, attention_mask, device)
+
+    return ref_via_frozen
 
 
 # ─── Log-prob computation ──────────────────────────────────────────────────
@@ -201,10 +280,13 @@ class GroupData:
 
 def collate_trajectories(
     trajectories: list[Trajectory],
-    ref_model: Qwen3_5ForConditionalGeneration | None,
+    compute_ref: "RefLogProbFn | None",
     device: torch.device,
 ) -> GroupData:
-    """Collate K trajectories into padded tensors, compute advantages and ref log-probs."""
+    """Collate K trajectories into padded tensors, compute advantages and ref log-probs.
+
+    `compute_ref(input_ids, attention_mask) -> (K, L-1) ref log-probs`, or None to skip KL.
+    """
     K = len(trajectories)
     max_len = max(len(t.full_ids) for t in trajectories)
 
@@ -225,9 +307,8 @@ def collate_trajectories(
     # old_log_probs is overwritten in the training loop (step 3) before use
     old_lp = torch.zeros(K, max_len - 1)
 
-    # Ref log-probs: swap ref model to GPU, compute, swap back
-    if ref_model is not None:
-        ref_lp = compute_ref_logprobs(ref_model, full_ids.to(device), attention_mask.to(device), device)
+    if compute_ref is not None:
+        ref_lp = compute_ref(full_ids.to(device), attention_mask.to(device))
     else:
         ref_lp = torch.zeros(K, max_len - 1, device=device)
 
@@ -354,12 +435,23 @@ def train(config: Config) -> None:
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Trainable parameters: {trainable_params:,}")
 
-    if config.grpo.kl_coeff > 0:
-        print("Loading reference model on CPU...")
-        ref_model = load_ref_model(config.model)
-    else:
+    if config.grpo.kl_coeff <= 0:
         print("KL disabled (kl_coeff=0), skipping reference model")
         ref_model = None
+    elif config.model.use_lora:
+        print("KL reference = frozen base (adapters disabled); no separate reference model")
+        ref_model = None
+    else:
+        print("Loading reference model on CPU...")
+        ref_model = load_ref_model(config.model)
+
+    compute_ref = make_ref_logprob_fn(
+        model=model,
+        ref_model=ref_model,
+        use_lora=config.model.use_lora,
+        kl_coeff=config.grpo.kl_coeff,
+        device=device,
+    )
 
     optimizer = torch.optim.AdamW(
         [p for p in model.parameters() if p.requires_grad],
@@ -456,7 +548,7 @@ def train(config: Config) -> None:
         torch.cuda.empty_cache() if device.type == "cuda" else None
 
         # ── 2. Collate + compute advantages ──
-        group = collate_trajectories(trajectories, ref_model, device)
+        group = collate_trajectories(trajectories, compute_ref, device)
 
         # ── 3. Recompute old log-probs from current model (before update) ──
         model.eval()
@@ -524,9 +616,7 @@ def train(config: Config) -> None:
             mean_actions=total_actions_sum / len(trajectories),
             mean_valid_actions=sum(t.num_valid_actions for t in trajectories) / len(trajectories),
             mean_level_ups=sum(t.num_level_ups for t in trajectories) / len(trajectories),
-            mean_tokens_per_action=(
-                sum(t.total_gen_tokens for t in trajectories) / max(total_actions_sum, 1)
-            ),
+            mean_tokens_per_action=(sum(t.total_gen_tokens for t in trajectories) / max(total_actions_sum, 1)),
             idle_count=sum(1 for t in trajectories if t.total_xp == 0 and t.num_actions > 0),
             policy_loss=sum(epoch_policy) / len(epoch_policy),
             kl_loss=sum(epoch_kl) / len(epoch_kl),
@@ -569,7 +659,8 @@ def train(config: Config) -> None:
             ckpt_path = os.path.join(model_dir, f"checkpoint_{step}.pt")
             torch.save(
                 {
-                    "model": model.state_dict(),
+                    "model": adapter_state_dict(model) if config.model.use_lora else model.state_dict(),
+                    "is_lora": config.model.use_lora,
                     "optimizer": optimizer.state_dict(),
                     "scheduler": scheduler.state_dict(),
                     "step": step,
@@ -582,7 +673,8 @@ def train(config: Config) -> None:
     final_path = os.path.join(model_dir, "checkpoint_final.pt")
     torch.save(
         {
-            "model": model.state_dict(),
+            "model": adapter_state_dict(model) if config.model.use_lora else model.state_dict(),
+            "is_lora": config.model.use_lora,
             "optimizer": optimizer.state_dict(),
             "scheduler": scheduler.state_dict(),
             "step": step,

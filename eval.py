@@ -13,6 +13,7 @@ import sys
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from lora import DEFAULT_TARGET_MODULES, apply_lora
 from rsenv import (
     Trajectory,
     format_state,
@@ -25,8 +26,14 @@ def load_checkpoint(
     checkpoint_path: str,
     model_name_or_path: str,
     device: torch.device,
+    model_config: dict | None = None,
 ) -> tuple[AutoModelForCausalLM, AutoTokenizer]:
-    """Load model from checkpoint."""
+    """Load model from checkpoint.
+
+    LoRA checkpoints hold only adapter tensors, so we rebuild the adapters (shapes/hyperparameters
+    from config.json) and load them with strict=False on top of the pretrained base. FP8 is not
+    re-applied here — eval runs the bf16 base, which is fine and keeps eval device-agnostic.
+    """
     tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -41,9 +48,24 @@ def load_checkpoint(
         model = model.to(device)
 
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=True)
-    model.load_state_dict(ckpt["model"])
+    is_lora = ckpt.get("is_lora", False)
+    if is_lora:
+        if model_config is None:
+            raise ValueError("LoRA checkpoint requires config.json (LoRA hyperparameters) to rebuild adapters")
+        apply_lora(
+            model,
+            r=model_config.get("lora_r", 16),
+            alpha=model_config.get("lora_alpha", 32),
+            dropout=0.0,  # inference: no adapter dropout
+            target_modules=tuple(model_config.get("lora_target_modules") or DEFAULT_TARGET_MODULES),
+        )
+        missing, unexpected = model.load_state_dict(ckpt["model"], strict=False)
+        if unexpected:
+            raise ValueError(f"Unexpected keys in LoRA checkpoint: {unexpected[:5]}")
+    else:
+        model.load_state_dict(ckpt["model"])
     step = ckpt.get("step", "?")
-    print(f"Loaded checkpoint from step {step}: {checkpoint_path}")
+    print(f"Loaded {'LoRA ' if is_lora else ''}checkpoint from step {step}: {checkpoint_path}")
 
     return model, tokenizer
 
@@ -137,20 +159,21 @@ def main() -> None:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Try to read model name from config.json in the same directory as checkpoint
+    # Try to read model name + LoRA hyperparameters from config.json next to the checkpoint
     model_name = args.model
-    if model_name is None:
-        config_path = os.path.join(os.path.dirname(args.checkpoint), "config.json")
-        if os.path.exists(config_path):
-            with open(config_path) as f:
-                config = json.load(f)
-            model_name = config["model"]["model_name_or_path"]
+    model_config: dict | None = None
+    config_path = os.path.join(os.path.dirname(args.checkpoint), "config.json")
+    if os.path.exists(config_path):
+        with open(config_path) as f:
+            model_config = json.load(f)["model"]
+        if model_name is None:
+            model_name = model_config["model_name_or_path"]
             print(f"Using model from config: {model_name}")
-        else:
-            print("No --model specified and no config.json found. Specify --model.", file=sys.stderr)
-            sys.exit(1)
+    if model_name is None:
+        print("No --model specified and no config.json found. Specify --model.", file=sys.stderr)
+        sys.exit(1)
 
-    model, tokenizer = load_checkpoint(args.checkpoint, model_name, device)
+    model, tokenizer = load_checkpoint(args.checkpoint, model_name, device, model_config)
     model.eval()
 
     results = evaluate(
