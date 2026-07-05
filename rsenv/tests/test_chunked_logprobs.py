@@ -4,11 +4,10 @@ CPU-only, tiny model. Guards the memory-bounded projection against numeric drift
 and confirms it is gradient-exact, so it is a safe drop-in for the GRPO update.
 """
 
-import pytest
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from rsenv.logprobs import _fused_available, per_token_logprobs, per_token_logprobs_fused
+from rsenv.logprobs import per_token_logprobs
 
 TINY_MODEL = "sshleifer/tiny-gpt2"
 
@@ -65,40 +64,3 @@ def test_gradients_match_naive():
     g_chunked = head.grad.detach().clone()
 
     assert torch.allclose(g_naive, g_chunked, atol=1e-4, rtol=1e-4)
-
-
-# ── Fused (Liger) path: GPU + liger-kernel only; skipped on CPU/no-liger ──
-
-_FUSED_RUNNABLE = torch.cuda.is_available() and _fused_available()
-_skip_fused = pytest.mark.skipif(not _FUSED_RUNNABLE, reason="fused path needs CUDA + liger-kernel (Triton, GPU-only)")
-
-
-@_skip_fused
-def test_fused_values_match_naive():
-    model, input_ids, attention_mask = _fixture()
-    model = model.cuda()
-    input_ids, attention_mask = input_ids.cuda(), attention_mask.cuda()
-    with torch.no_grad():
-        naive = _naive_logprobs(model, input_ids, attention_mask)
-        fused = per_token_logprobs_fused(model, input_ids, attention_mask)
-    assert fused.shape == naive.shape
-    assert torch.allclose(fused.float(), naive.float(), atol=1e-3, rtol=1e-3)
-
-
-@_skip_fused
-def test_fused_gradients_match_naive():
-    """Backprop through the fused kernel must match the naive lm_head path."""
-    model, input_ids, attention_mask = _fixture()
-    model = model.cuda()
-    input_ids, attention_mask = input_ids.cuda(), attention_mask.cuda()
-    head = model.get_output_embeddings().weight
-
-    model.zero_grad()
-    _naive_logprobs(model, input_ids, attention_mask).sum().backward()
-    g_naive = head.grad.detach().clone()
-
-    model.zero_grad()
-    per_token_logprobs_fused(model, input_ids, attention_mask).sum().backward()
-    g_fused = head.grad.detach().clone()
-
-    assert torch.allclose(g_naive.float(), g_fused.float(), atol=1e-3, rtol=1e-3)

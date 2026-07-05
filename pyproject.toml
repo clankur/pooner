@@ -18,7 +18,7 @@ dependencies = [
 
 [project.optional-dependencies]
 cpu = ["torch", "torchvision"]
-gpu = ["torch", "torchvision", "liger-kernel"]
+gpu = ["torch", "torchvision"]
 
 [tool.uv]
 conflicts = [

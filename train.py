@@ -45,7 +45,6 @@ class ModelConfig:
     quantize_int4: bool = True
     max_new_tokens: int = 512
     temperature: float = 0.8
-    logprob_impl: str = "chunked"  # per-token logprob path: "chunked" | "fused" (Liger) | "auto"
 
 
 @dataclass(frozen=True)
@@ -144,12 +143,11 @@ def compute_ref_logprobs(
     input_ids: torch.Tensor,
     attention_mask: torch.Tensor,
     device: torch.device,
-    impl: str = "chunked",
 ) -> torch.Tensor:
     """Swap ref model to GPU, compute logprobs, swap back. Returns cached tensor on device."""
     ref_model.to(device)
     with torch.no_grad():
-        ref_lp = get_per_token_logprobs(ref_model, input_ids, attention_mask, impl=impl)
+        ref_lp = get_per_token_logprobs(ref_model, input_ids, attention_mask)
     ref_model.to("cpu")
     torch.cuda.empty_cache()
     return ref_lp  # stays on device
@@ -162,21 +160,19 @@ def get_per_token_logprobs(
     model: Qwen3_5ForConditionalGeneration,
     input_ids: torch.Tensor,
     attention_mask: torch.Tensor,
-    impl: str = "chunked",
 ) -> torch.Tensor:
     """Forward pass → per-token log-probability of the actual next token.
 
     Args:
         input_ids: (B, L) token ids
         attention_mask: (B, L)
-        impl: logprob path — "chunked" (default), "fused" (Liger), or "auto".
 
     Returns:
         (B, L-1) log-probs for tokens at positions 1..L-1
     """
     # Memory-bounded vocab projection: peak logits memory is independent of L.
     # See rsenv/logprobs.py.
-    return per_token_logprobs(model, input_ids, attention_mask, impl=impl)
+    return per_token_logprobs(model, input_ids, attention_mask)
 
 
 # ─── GRPO loss ─────────────────────────────────────────────────────────────
@@ -199,7 +195,6 @@ def collate_trajectories(
     trajectories: list[Trajectory],
     ref_model: Qwen3_5ForConditionalGeneration | None,
     device: torch.device,
-    logprob_impl: str = "chunked",
 ) -> GroupData:
     """Collate K trajectories into padded tensors, compute advantages and ref log-probs."""
     K = len(trajectories)
@@ -224,9 +219,7 @@ def collate_trajectories(
 
     # Ref log-probs: swap ref model to GPU, compute, swap back
     if ref_model is not None:
-        ref_lp = compute_ref_logprobs(
-            ref_model, full_ids.to(device), attention_mask.to(device), device, impl=logprob_impl
-        )
+        ref_lp = compute_ref_logprobs(ref_model, full_ids.to(device), attention_mask.to(device), device)
     else:
         ref_lp = torch.zeros(K, max_len - 1, device=device)
 
@@ -474,12 +467,12 @@ def train(config: Config) -> None:
         _reset_peak_mem(device)  # measure training-phase peak (collate + logprobs + update)
 
         # ── 2. Collate + compute advantages ──
-        group = collate_trajectories(trajectories, ref_model, device, logprob_impl=config.model.logprob_impl)
+        group = collate_trajectories(trajectories, ref_model, device)
 
         # ── 3. Recompute old log-probs from current model (before update) ──
         model.eval()
         with torch.no_grad():
-            old_lp = get_per_token_logprobs(model, group.full_ids, group.attention_mask, impl=config.model.logprob_impl)
+            old_lp = get_per_token_logprobs(model, group.full_ids, group.attention_mask)
         group.old_log_probs = old_lp
 
         # ── 4. GRPO update epochs ──
@@ -499,7 +492,7 @@ def train(config: Config) -> None:
             for b in range(K):
                 ids_b = rearrange(group.full_ids[b], "l -> 1 l")
                 mask_b = rearrange(group.attention_mask[b], "l -> 1 l")
-                new_lp_b = per_token_logprobs(model, ids_b, mask_b, impl=config.model.logprob_impl)[0]
+                new_lp_b = per_token_logprobs(model, ids_b, mask_b)[0]
 
                 total_b, p_b, kl_b = grpo_loss(
                     new_log_probs=rearrange(new_lp_b, "l -> 1 l"),
