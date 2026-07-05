@@ -31,21 +31,36 @@ from torch.utils.checkpoint import checkpoint
 LOGPROB_CHUNK_SIZE = 1024
 
 
-def _chunk_logprobs(
+def _project(
     lm_head: torch.nn.Module,
     hidden_chunk: torch.Tensor,  # (c, H)
     targets_chunk: torch.Tensor,  # (c,)
 ) -> torch.Tensor:  # (c,)
     """Project one block of hidden states to the log-prob of its actual next token.
 
-    The ``(c, vocab)`` logits exist only inside this call. Run under
-    ``torch.utils.checkpoint`` in the grad path so the block is recomputed in
-    backward rather than retained -- otherwise ``logsumexp`` keeps every block's
-    ``(c, vocab)`` logits alive until ``.backward()`` and the peak grows with ``L``.
+    The ``(c, vocab)`` logits exist only for the duration of this call.
     """
     logits = lm_head(hidden_chunk)  # (c, V)
     target_logits = logits.gather(dim=-1, index=rearrange(targets_chunk, "c -> c 1")).squeeze(-1)  # (c,)
     return target_logits - torch.logsumexp(logits, dim=-1)  # (c,)
+
+
+def _block_logprobs(
+    lm_head: torch.nn.Module,
+    hidden_chunk: torch.Tensor,  # (c, H)
+    targets_chunk: torch.Tensor,  # (c,)
+) -> torch.Tensor:  # (c,)
+    """One block's log-probs, checkpointing the projection only when it carries grad.
+
+    Under gradient, ``_project``'s ``logsumexp`` would save its ``(c, vocab)`` logits
+    for backward, so a plain loop keeps every block's logits alive until ``.backward()``
+    and the peak climbs to ``L * vocab``. Checkpointing recomputes each block in backward
+    instead, holding the peak at ``chunk_size * vocab``. The no-grad reference/old passes
+    save nothing for backward, so they skip the checkpoint and pay no recompute.
+    """
+    if torch.is_grad_enabled():
+        return checkpoint(_project, lm_head, hidden_chunk, targets_chunk, use_reentrant=False)
+    return _project(lm_head, hidden_chunk, targets_chunk)
 
 
 def per_token_logprobs(
@@ -58,7 +73,7 @@ def per_token_logprobs(
 
     Same result as projecting all ``L`` positions at once, but the full-vocab
     logits never exist for more than ``chunk_size`` positions simultaneously --
-    including under gradient, via per-block checkpointing (see ``_chunk_logprobs``).
+    including under gradient, via per-block checkpointing (see ``_block_logprobs``).
     """
     trunk = model.base_model  # transformer body without the lm_head
     lm_head = model.get_output_embeddings()
@@ -76,13 +91,7 @@ def per_token_logprobs(
         for s in range(0, hidden.shape[0], chunk_size):
             h = hidden[s : s + chunk_size]  # (c, H)
             tgt = targets[s : s + chunk_size]  # (c,)
-            if torch.is_grad_enabled():
-                # Recompute this block's (c, vocab) logits in backward instead of
-                # retaining them, so the peak stays chunk_size * vocab under gradient.
-                lp = checkpoint(_chunk_logprobs, lm_head, h, tgt, use_reentrant=False)
-            else:
-                lp = _chunk_logprobs(lm_head, h, tgt)
-            lp_chunks.append(lp)  # (c,)
+            lp_chunks.append(_block_logprobs(lm_head, h, tgt))  # (c,)
 
         lp_b = torch.cat(lp_chunks) if lp_chunks else hidden.new_zeros(0)
         all_lp.append(lp_b)
