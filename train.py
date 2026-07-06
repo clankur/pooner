@@ -304,6 +304,7 @@ class StepMetrics:
     group_std_reward: float
     group_min_reward: float
     group_max_reward: float
+    reward_components: dict[str, float]  # group mean of each compute_reward component
     group_mean_xp: float
     mean_actions: float
     mean_valid_actions: float
@@ -528,6 +529,10 @@ def train(config: Config) -> None:
         # ── 5. Log metrics ──
         rewards = torch.tensor(group.rewards)
         total_actions_sum = sum(t.num_actions for t in trajectories)
+        reward_components = {
+            name: sum(t.reward_metrics[name] for t in trajectories) / len(trajectories)
+            for name in trajectories[0].reward_metrics
+        }
         metrics = StepMetrics(
             step=step,
             learning_rate=current_lr,
@@ -535,6 +540,7 @@ def train(config: Config) -> None:
             group_std_reward=rewards.std().item(),
             group_min_reward=rewards.min().item(),
             group_max_reward=rewards.max().item(),
+            reward_components=reward_components,
             group_mean_xp=sum(t.total_xp for t in trajectories) / len(trajectories),
             mean_actions=total_actions_sum / len(trajectories),
             mean_valid_actions=sum(t.num_valid_actions for t in trajectories) / len(trajectories),
@@ -551,37 +557,27 @@ def train(config: Config) -> None:
         metrics_log.append(metrics)
 
         if step % config.grpo.log_interval == 0:
-            print(
-                f"[Step {step:>4d}] "
-                f"reward={metrics.group_mean_reward:>6.2f} "
-                f"xp={metrics.group_mean_xp:>6.1f} "
-                f"actions={metrics.mean_actions:>4.1f}/{metrics.mean_valid_actions:>4.1f} "
-                f"loss={metrics.total_loss:>8.4f} "
-                f"kl={metrics.kl_loss:>7.4f} "
-                f"lr={metrics.learning_rate:.2e} "
-                f"mem(gen/train)={metrics.gen_peak_mem_gb:>4.1f}/{metrics.train_peak_mem_gb:>4.1f}GB "
-                f"t={metrics.elapsed_sec:>6.1f}s",
-                flush=True,
-            )
-            wandb.log(
-                {
-                    "group_mean_reward": metrics.group_mean_reward,
-                    "group_std_reward": metrics.group_std_reward,
-                    "group_mean_xp": metrics.group_mean_xp,
-                    "mean_actions": metrics.mean_actions,
-                    "mean_valid_actions": metrics.mean_valid_actions,
-                    "mean_level_ups": metrics.mean_level_ups,
-                    "mean_tokens_per_action": metrics.mean_tokens_per_action,
-                    "idle_count": metrics.idle_count,
-                    "policy_loss": metrics.policy_loss,
-                    "kl_loss": metrics.kl_loss,
-                    "total_loss": metrics.total_loss,
-                    "learning_rate": metrics.learning_rate,
-                    "gen_peak_mem_gb": metrics.gen_peak_mem_gb,
-                    "train_peak_mem_gb": metrics.train_peak_mem_gb,
-                },
-                step=step,
-            )
+            log_dict = {
+                "group_mean_reward": metrics.group_mean_reward,
+                "group_std_reward": metrics.group_std_reward,
+                "group_mean_xp": metrics.group_mean_xp,
+                "mean_actions": metrics.mean_actions,
+                "mean_valid_actions": metrics.mean_valid_actions,
+                "mean_level_ups": metrics.mean_level_ups,
+                "mean_tokens_per_action": metrics.mean_tokens_per_action,
+                "idle_count": metrics.idle_count,
+                "policy_loss": metrics.policy_loss,
+                "kl_loss": metrics.kl_loss,
+                "total_loss": metrics.total_loss,
+                "learning_rate": metrics.learning_rate,
+                "elapsed_sec": metrics.elapsed_sec,
+                "gen_peak_mem_gb": metrics.gen_peak_mem_gb,
+                "train_peak_mem_gb": metrics.train_peak_mem_gb,
+                **{f"reward/{name}": value for name, value in metrics.reward_components.items()},
+            }
+            printable = {name: round(value, 4) for name, value in log_dict.items()}
+            print(f"[Step {step:>4d}] {printable}", flush=True)
+            wandb.log(log_dict, step=step)
 
         if config.grpo.checkpoint_interval > 0 and step > 0 and step % config.grpo.checkpoint_interval == 0:
             ckpt_path = os.path.join(model_dir, f"checkpoint_{step}.pt")
