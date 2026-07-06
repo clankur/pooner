@@ -19,7 +19,7 @@ from __future__ import annotations
 import queue
 import threading
 import time
-from dataclasses import dataclass, field
+from concurrent.futures import Future
 from typing import TYPE_CHECKING
 
 import torch
@@ -27,15 +27,9 @@ import torch
 if TYPE_CHECKING:
     from transformers import PreTrainedModel, PreTrainedTokenizer
 
-
-@dataclass
-class _Request:
-    """One rollout's pending generation: input tokens in, generated tokens out."""
-
-    token_ids: list[int]
-    ready: threading.Event = field(default_factory=threading.Event)
-    new_ids: list[int] | None = None
-    error: BaseException | None = None
+# One rollout's pending generation: input token ids in, a Future that the
+# server thread resolves with the generated ids (or the batch's exception).
+_Request = tuple[list[int], "Future[list[int]]"]
 
 
 def trim_at_stop(row: list[int], stop_ids: set[int], pad_id: int) -> list[int]:
@@ -120,13 +114,9 @@ class GenerationService:
         """
         if self._thread is None or not self._thread.is_alive():
             raise RuntimeError("GenerationService is not running; call start() first")
-        request = _Request(token_ids=list(token_ids))
-        self._queue.put(request)
-        request.ready.wait()
-        if request.error is not None:
-            raise request.error
-        assert request.new_ids is not None
-        return request.new_ids
+        future: Future[list[int]] = Future()
+        self._queue.put((list(token_ids), future))
+        return future.result()
 
     def _serve(self) -> None:
         while True:
@@ -137,31 +127,27 @@ class GenerationService:
             # Coalesce: requests that arrive within the window — or that piled
             # up while the previous batch was generating — ride along.
             deadline = time.monotonic() + self.coalesce_window_s
-            stopping = False
             while (remaining := deadline - time.monotonic()) > 0:
                 try:
                     nxt = self._queue.get(timeout=remaining)
                 except queue.Empty:
                     break
                 if nxt is None:
-                    stopping = True
+                    # Re-queue the stop sentinel so the outer loop exits after
+                    # this batch is served.
+                    self._queue.put(None)
                     break
                 batch.append(nxt)
             self._run_batch(batch)
-            if stopping:
-                return
 
     def _run_batch(self, batch: list[_Request]) -> None:
         try:
-            results = self._generate_batch([r.token_ids for r in batch])
-            for request, new_ids in zip(batch, results):
-                request.new_ids = new_ids
+            results = self._generate_batch([token_ids for token_ids, _ in batch])
+            for (_, future), new_ids in zip(batch, results):
+                future.set_result(new_ids)
         except BaseException as e:
-            for request in batch:
-                request.error = e
-        finally:
-            for request in batch:
-                request.ready.set()
+            for _, future in batch:
+                future.set_exception(e)
 
     def _generate_batch(self, sequences: list[list[int]]) -> list[list[int]]:
         # Left-pad so every row's last real token sits at the same position;
