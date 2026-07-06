@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 import random
-import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
 from xml.etree.ElementTree import Element, SubElement, indent, tostring
@@ -18,9 +17,10 @@ import torch
 from pydantic import BaseModel
 
 if TYPE_CHECKING:
-    from transformers import AutoProcessor, PreTrainedModel
+    from transformers import AutoProcessor
 
 from rsenv.client import RSClient
+from rsenv.generation import GenerationService
 from rsenv.state import ALL_SKILLS, XP_FOR_LEVEL, GameState, Trajectory, xp_to_level
 from rsenv.tools import TOOL_SCHEMAS, parse_tool_calls
 
@@ -271,8 +271,7 @@ def compute_reward(
 
     # 2. Level-up bonus
     num_level_ups = sum(
-        max(0, xp_to_level(final_skills[s]) - xp_to_level(initial_skills.get(s, 0)))
-        for s in final_skills
+        max(0, xp_to_level(final_skills[s]) - xp_to_level(initial_skills.get(s, 0))) for s in final_skills
     )
     reward += 2.0 * num_level_ups
 
@@ -300,18 +299,17 @@ def compute_reward(
 
 
 def rollout_trajectory(
-    model: PreTrainedModel,
+    generation: GenerationService,
     processor: "AutoProcessor",
     initial_state: GameState,
     max_actions: int,
-    max_new_tokens: int,
-    temperature: float,
-    device: torch.device,
     client: RSClient | None = None,
-    model_lock: threading.Lock | None = None,
     xp_multiplier: int = 1,
 ) -> Trajectory:
     """Roll out a plan-then-execute trajectory.
+
+    Generation goes through the shared GenerationService, so concurrent
+    rollout threads batch their GPU work instead of serializing it.
 
     If client is provided, actions execute through it (sim or live).
     If client is None, a temporary SimClient is created from initial_state.
@@ -324,7 +322,7 @@ def rollout_trajectory(
         client = SimClient(initial_state)
         state = client.get_state()
 
-    tokenizer = processor.tokenizer
+    tokenizer = generation.tokenizer
     initial_xp = state.total_xp()
     initial_skills = dict(state.skills)
     initial_position = state.world_position
@@ -344,12 +342,6 @@ def rollout_trajectory(
 
     all_token_ids: list[int] = prompt_ids.tolist()
     gen_mask: list[int] = [0] * prompt_len
-    model_log_probs: list[float] = []
-
-    stop_ids = [tokenizer.eos_token_id]
-    im_end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
-    if isinstance(im_end_id, int) and im_end_id != tokenizer.unk_token_id:
-        stop_ids.append(im_end_id)
 
     num_actions = 0
     num_valid = 0
@@ -357,30 +349,8 @@ def rollout_trajectory(
     action_xp_history: list[tuple[str, dict[str, float]]] = []
     _logged_first = False
 
-    generate_kwargs: dict = {
-        "max_new_tokens": max_new_tokens,
-        "temperature": temperature,
-        "do_sample": True,
-        "pad_token_id": tokenizer.pad_token_id,
-        "eos_token_id": stop_ids,
-        "return_dict_in_generate": True,
-        "output_scores": True,
-    }
-
-    model.eval()
     for _action_idx in range(max_actions):
-        input_ids = torch.tensor([all_token_ids], device=device)
-
-        if model_lock is not None:
-            model_lock.acquire()
-        try:
-            with torch.no_grad():
-                outputs = model.generate(input_ids, **generate_kwargs)
-        finally:
-            if model_lock is not None:
-                model_lock.release()
-
-        new_ids = outputs.sequences[0, len(all_token_ids) :]
+        new_ids = generation.generate(all_token_ids)
         new_text = tokenizer.decode(new_ids, skip_special_tokens=False)
         total_gen_tokens += len(new_ids)
 
@@ -388,12 +358,7 @@ def rollout_trajectory(
             logger.info("First generation (%d tokens): %s", len(new_ids), repr(new_text[:1000]))
             _logged_first = True
 
-        for i, score in enumerate(outputs.scores):
-            log_probs = torch.log_softmax(score[0], dim=-1)
-            token_id = new_ids[i].item()
-            model_log_probs.append(log_probs[token_id].item())
-
-        all_token_ids.extend(new_ids.tolist())
+        all_token_ids.extend(new_ids)
         gen_mask.extend([1] * len(new_ids))
 
         calls = parse_tool_calls(new_text)
@@ -458,7 +423,6 @@ def rollout_trajectory(
         prompt_ids=torch.tensor(prompt_ids.tolist()[:prompt_len]),
         full_ids=torch.tensor(all_token_ids),
         generation_mask=torch.tensor(gen_mask, dtype=torch.float32),
-        old_log_probs=torch.tensor(model_log_probs),
         total_reward=reward,
         total_xp=total_xp_gained,
         num_actions=num_actions,

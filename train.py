@@ -9,7 +9,6 @@ import logging
 import math
 import os
 import random
-import threading
 import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -26,6 +25,7 @@ from transformers import AutoProcessor, Qwen3_5ForConditionalGeneration
 from rsenv import (
     BridgeClient,
     BridgeClientPool,
+    GenerationService,
     SimClient,
     Trajectory,
     load_prompt_bank,
@@ -373,6 +373,17 @@ def train(config: Config) -> None:
     )
     scheduler = build_lr_scheduler(optimizer, config.grpo)
 
+    # All rollout generation funnels through one service thread that batches
+    # concurrent requests into a single left-padded model.generate call.
+    gen_service = GenerationService(
+        model=model,
+        tokenizer=processor.tokenizer,
+        max_new_tokens=config.model.max_new_tokens,
+        temperature=config.model.temperature,
+        device=device,
+    )
+    gen_service.start()
+
     # Game client: live server or heuristic simulator
     client: SimClient | BridgeClient | None = None
     client_pool: BridgeClientPool | None = None
@@ -425,20 +436,17 @@ def train(config: Config) -> None:
             # Randomize starting state for variance across steps
             reset_target = random_starting_state(state_rng)
             client_pool.reset_all(reset_target)
-            model_lock = threading.Lock()
             K = min(config.grpo.group_size, len(client_pool))
 
+            # Each thread drives its own bot at its own pace; their generate
+            # calls coalesce into batched GPU work inside gen_service.
             def _run_rollout(k: int) -> Trajectory:
                 return rollout_trajectory(
-                    model=model,
+                    generation=gen_service,
                     processor=processor,
                     initial_state=reset_target,
                     max_actions=config.env.max_actions,
-                    max_new_tokens=config.model.max_new_tokens,
-                    temperature=config.model.temperature,
-                    device=device,
                     client=client_pool[k],
-                    model_lock=model_lock,
                     xp_multiplier=config.env.xp_multiplier,
                 )
 
@@ -448,13 +456,10 @@ def train(config: Config) -> None:
         else:
             for _k in range(config.grpo.group_size):
                 traj = rollout_trajectory(
-                    model=model,
+                    generation=gen_service,
                     processor=processor,
                     initial_state=state,
                     max_actions=config.env.max_actions,
-                    max_new_tokens=config.model.max_new_tokens,
-                    temperature=config.model.temperature,
-                    device=device,
                     client=client,
                     xp_multiplier=config.env.xp_multiplier,
                 )
@@ -608,6 +613,8 @@ def train(config: Config) -> None:
     with open(metrics_path, "w") as f:
         for m in metrics_log:
             f.write(json.dumps(asdict(m)) + "\n")
+
+    gen_service.stop()
 
     if client_pool is not None:
         client_pool.stop_all()

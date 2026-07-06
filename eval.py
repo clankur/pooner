@@ -14,6 +14,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from rsenv import (
+    GenerationService,
     Trajectory,
     format_state,
     load_prompt_bank,
@@ -79,16 +80,24 @@ def evaluate(
     prompt_bank = load_prompt_bank(seed=123)
     results: list[dict] = []
 
+    # AutoTokenizer serves as the processor here: rollout only needs
+    # apply_chat_template from it, and decoding goes through the service.
+    gen_service = GenerationService(
+        model=model,
+        tokenizer=tokenizer,
+        max_new_tokens=max_new_tokens,
+        temperature=temperature,
+        device=device,
+    )
+    gen_service.start()
+
     for i in range(num_episodes):
         state = prompt_bank[i % len(prompt_bank)]
         traj = rollout_trajectory(
-            model=model,
-            tokenizer=tokenizer,
+            generation=gen_service,
+            processor=tokenizer,
             initial_state=state,
             max_actions=max_actions,
-            max_new_tokens=max_new_tokens,
-            temperature=temperature,
-            device=device,
         )
 
         result = {
@@ -103,6 +112,8 @@ def evaluate(
 
         if verbose:
             print_trajectory(traj, tokenizer, i)
+
+    gen_service.stop()
 
     # Summary
     print(f"\n{'=' * 80}")
