@@ -271,8 +271,7 @@ def compute_reward(
 
     # 2. Level-up bonus
     num_level_ups = sum(
-        max(0, xp_to_level(final_skills[s]) - xp_to_level(initial_skills.get(s, 0)))
-        for s in final_skills
+        max(0, xp_to_level(final_skills[s]) - xp_to_level(initial_skills.get(s, 0))) for s in final_skills
     )
     reward += 2.0 * num_level_ups
 
@@ -310,6 +309,7 @@ def rollout_trajectory(
     client: RSClient | None = None,
     model_lock: threading.Lock | None = None,
     xp_multiplier: int = 1,
+    fp8_kv_cache: bool = False,
 ) -> Trajectory:
     """Roll out a plan-then-execute trajectory.
 
@@ -344,7 +344,6 @@ def rollout_trajectory(
 
     all_token_ids: list[int] = prompt_ids.tolist()
     gen_mask: list[int] = [0] * prompt_len
-    model_log_probs: list[float] = []
 
     stop_ids = [tokenizer.eos_token_id]
     im_end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
@@ -363,35 +362,42 @@ def rollout_trajectory(
         "do_sample": True,
         "pad_token_id": tokenizer.pad_token_id,
         "eos_token_id": stop_ids,
-        "return_dict_in_generate": True,
-        "output_scores": True,
+        # Explicitly enable the KV cache: gradient_checkpointing_enable() sets
+        # config.use_cache=False, and whether generate() overrides that is
+        # version-dependent — so pin it here. Generation logprobs are not
+        # requested (output_scores) because they're recomputed in training.
+        "use_cache": True,
     }
+
+    if fp8_kv_cache:
+        from rsenv.fp8_cache import Float8Cache
 
     model.eval()
     for _action_idx in range(max_actions):
         input_ids = torch.tensor([all_token_ids], device=device)
 
+        # A fresh fp8 cache per action: the context is re-fed whole from
+        # all_token_ids each action, so the cache is not reused across actions.
+        kwargs = generate_kwargs
+        if fp8_kv_cache:
+            kwargs = {**generate_kwargs, "past_key_values": Float8Cache()}
+
         if model_lock is not None:
             model_lock.acquire()
         try:
             with torch.no_grad():
-                outputs = model.generate(input_ids, **generate_kwargs)
+                outputs = model.generate(input_ids, **kwargs)
         finally:
             if model_lock is not None:
                 model_lock.release()
 
-        new_ids = outputs.sequences[0, len(all_token_ids) :]
+        new_ids = outputs[0, len(all_token_ids) :]
         new_text = tokenizer.decode(new_ids, skip_special_tokens=False)
         total_gen_tokens += len(new_ids)
 
         if not _logged_first:
             logger.info("First generation (%d tokens): %s", len(new_ids), repr(new_text[:1000]))
             _logged_first = True
-
-        for i, score in enumerate(outputs.scores):
-            log_probs = torch.log_softmax(score[0], dim=-1)
-            token_id = new_ids[i].item()
-            model_log_probs.append(log_probs[token_id].item())
 
         all_token_ids.extend(new_ids.tolist())
         gen_mask.extend([1] * len(new_ids))
@@ -458,7 +464,7 @@ def rollout_trajectory(
         prompt_ids=torch.tensor(prompt_ids.tolist()[:prompt_len]),
         full_ids=torch.tensor(all_token_ids),
         generation_mask=torch.tensor(gen_mask, dtype=torch.float32),
-        old_log_probs=torch.tensor(model_log_probs),
+        old_log_probs=torch.empty(0),  # recomputed from the current model in the training loop
         total_reward=reward,
         total_xp=total_xp_gained,
         num_actions=num_actions,
