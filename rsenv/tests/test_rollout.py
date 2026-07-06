@@ -4,7 +4,7 @@ import pytest
 import torch
 from transformers import AutoProcessor, Qwen3_5ForConditionalGeneration
 
-from rsenv import BridgeClient, format_state, rollout_trajectory
+from rsenv import BridgeClient, GenerationService, format_state, rollout_trajectory
 
 MODEL_ID = "Qwen/Qwen3.5-0.8B"
 
@@ -42,16 +42,24 @@ def test_rollout_with_bridge(model_and_processor, bridge_client):
     model, processor, device = model_and_processor
     state = bridge_client.get_state()
 
-    traj = rollout_trajectory(
+    gen_service = GenerationService(
         model=model,
-        processor=processor,
-        initial_state=state,
-        max_actions=3,
+        tokenizer=processor.tokenizer,
         max_new_tokens=2048,
         temperature=0.7,
         device=device,
-        client=bridge_client,
     )
+    gen_service.start()
+    try:
+        traj = rollout_trajectory(
+            generation=gen_service,
+            processor=processor,
+            initial_state=state,
+            max_actions=3,
+            client=bridge_client,
+        )
+    finally:
+        gen_service.stop()
 
     assert len(traj.full_ids) > len(traj.prompt_ids), "Model should generate tokens beyond the prompt"
     assert len(traj.full_ids) == len(traj.generation_mask), "generation_mask must match full_ids length"

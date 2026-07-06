@@ -160,7 +160,6 @@ class Trajectory:
     prompt_ids: torch.Tensor
     full_ids: torch.Tensor
     generation_mask: torch.Tensor
-    old_log_probs: torch.Tensor
     total_reward: float
     total_xp: float
     num_actions: int
