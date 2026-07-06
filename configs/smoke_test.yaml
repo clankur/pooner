@@ -6,7 +6,6 @@ defaults:
 
 model:
   model_name_or_path: "Qwen/Qwen3.5-0.8B"
-  quantize_int4: false
   max_new_tokens: 32
   temperature: 1.0
 
