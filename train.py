@@ -373,17 +373,6 @@ def train(config: Config) -> None:
     )
     scheduler = build_lr_scheduler(optimizer, config.grpo)
 
-    # All rollout generation funnels through one service thread that batches
-    # concurrent requests into a single left-padded model.generate call.
-    gen_service = GenerationService(
-        model=model,
-        tokenizer=processor.tokenizer,
-        max_new_tokens=config.model.max_new_tokens,
-        temperature=config.model.temperature,
-        device=device,
-    )
-    gen_service.start()
-
     # Game client: live server or heuristic simulator
     client: SimClient | BridgeClient | None = None
     client_pool: BridgeClientPool | None = None
@@ -408,6 +397,20 @@ def train(config: Config) -> None:
             print(
                 f"Bridge connected. Position: {initial_state.position}, HP: {initial_state.hp}/{initial_state.max_hp}"
             )
+
+    # All rollout generation funnels through one service thread that batches
+    # concurrent requests into a single left-padded model.generate call. Only
+    # the bridge-pool path has concurrent requesters worth waiting for; the
+    # sequential paths get a zero window so each batch-of-1 starts immediately.
+    gen_service = GenerationService(
+        model=model,
+        tokenizer=processor.tokenizer,
+        max_new_tokens=config.model.max_new_tokens,
+        temperature=config.model.temperature,
+        device=device,
+        coalesce_window_s=0.1 if client_pool is not None else 0.0,
+    )
+    gen_service.start()
 
     prompt_bank = load_prompt_bank(seed=config.grpo.seed)
     model_dir = os.path.join(config.paths.root_working_dir, config.paths.model_name)

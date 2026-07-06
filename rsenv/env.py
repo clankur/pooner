@@ -17,7 +17,7 @@ import torch
 from pydantic import BaseModel
 
 if TYPE_CHECKING:
-    from transformers import AutoProcessor
+    from transformers import AutoProcessor, PreTrainedTokenizer
 
 from rsenv.client import RSClient
 from rsenv.generation import GenerationService
@@ -300,7 +300,7 @@ def compute_reward(
 
 def rollout_trajectory(
     generation: GenerationService,
-    processor: "AutoProcessor",
+    processor: "AutoProcessor | PreTrainedTokenizer",
     initial_state: GameState,
     max_actions: int,
     client: RSClient | None = None,
@@ -309,7 +309,10 @@ def rollout_trajectory(
     """Roll out a plan-then-execute trajectory.
 
     Generation goes through the shared GenerationService, so concurrent
-    rollout threads batch their GPU work instead of serializing it.
+    rollout threads batch their GPU work instead of serializing it. The
+    processor (anything providing apply_chat_template + decode — a processor
+    or a bare tokenizer) is the single tokenization authority here; the
+    service's tokenizer is only used internally for pad/stop ids.
 
     If client is provided, actions execute through it (sim or live).
     If client is None, a temporary SimClient is created from initial_state.
@@ -322,7 +325,6 @@ def rollout_trajectory(
         client = SimClient(initial_state)
         state = client.get_state()
 
-    tokenizer = generation.tokenizer
     initial_xp = state.total_xp()
     initial_skills = dict(state.skills)
     initial_position = state.world_position
@@ -351,7 +353,7 @@ def rollout_trajectory(
 
     for _action_idx in range(max_actions):
         new_ids = generation.generate(all_token_ids)
-        new_text = tokenizer.decode(new_ids, skip_special_tokens=False)
+        new_text = processor.decode(new_ids, skip_special_tokens=False)
         total_gen_tokens += len(new_ids)
 
         if not _logged_first:

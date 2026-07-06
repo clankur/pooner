@@ -80,14 +80,15 @@ def evaluate(
     prompt_bank = load_prompt_bank(seed=123)
     results: list[dict] = []
 
-    # AutoTokenizer serves as the processor here: rollout only needs
-    # apply_chat_template from it, and decoding goes through the service.
+    # Episodes run one at a time, so there is never a second request to
+    # coalesce with — a zero window skips the batching wait entirely.
     gen_service = GenerationService(
         model=model,
         tokenizer=tokenizer,
         max_new_tokens=max_new_tokens,
         temperature=temperature,
         device=device,
+        coalesce_window_s=0.0,
     )
     gen_service.start()
 

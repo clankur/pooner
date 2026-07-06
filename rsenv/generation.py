@@ -67,17 +67,23 @@ class GenerationService:
         temperature: float,
         device: torch.device,
         coalesce_window_s: float = 0.1,
+        extra_stop_tokens: tuple[str, ...] = ("<|im_end|>",),
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
         self.device = device
         self.coalesce_window_s = coalesce_window_s
 
+        # Model-family turn delimiters (default: Qwen ChatML). Tokens the
+        # tokenizer doesn't know are skipped, so an inapplicable default is
+        # harmless — but a family whose delimiter isn't listed here would
+        # generate past end-of-turn until max_new_tokens.
         stop_ids = [tokenizer.eos_token_id]
-        im_end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
-        if isinstance(im_end_id, int) and im_end_id != tokenizer.unk_token_id:
-            stop_ids.append(im_end_id)
-        self.stop_ids: list[int] = stop_ids
+        for token in extra_stop_tokens:
+            token_id = tokenizer.convert_tokens_to_ids(token)
+            if isinstance(token_id, int) and token_id != tokenizer.unk_token_id:
+                stop_ids.append(token_id)
+        self.stop_set: set[int] = set(stop_ids)
         # Falling back to EOS (HF's own default) is safe for trimming: pad-as-stop
         # rows keep exactly one EOS then cut, same as a batch-1 generate.
         self.pad_id: int = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
@@ -167,6 +173,5 @@ class GenerationService:
                 **self.generate_kwargs,
             )
 
-        stop_set = set(self.stop_ids)
         generated_rows = outputs[:, max_len:].tolist()
-        return [trim_at_stop(row, stop_set, self.pad_id) for row in generated_rows]
+        return [trim_at_stop(row, self.stop_set, self.pad_id) for row in generated_rows]

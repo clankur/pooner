@@ -129,6 +129,20 @@ def test_single_request_round_trip():
         service.stop()
 
 
+def test_zero_coalesce_window_serves_batch_of_one():
+    # Sequential callers (eval, sim path) use window 0 to skip the batching wait.
+    model = StubModel()
+    service = make_service(model, coalesce_window_s=0.0)
+    service.start()
+    try:
+        assert service.generate([4]) == expected_generation(4)
+        assert service.generate([7]) == expected_generation(7)
+    finally:
+        service.stop()
+
+    assert model.batch_sizes == [1, 1]
+
+
 def test_concurrent_requests_coalesce_into_one_batch():
     model = StubModel()
     service = make_service(model, coalesce_window_s=0.5)
