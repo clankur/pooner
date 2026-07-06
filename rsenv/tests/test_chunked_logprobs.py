@@ -64,3 +64,44 @@ def test_gradients_match_naive():
     g_chunked = head.grad.detach().clone()
 
     assert torch.allclose(g_naive, g_chunked, atol=1e-4, rtol=1e-4)
+
+
+def _count_lm_head_calls(model, run):
+    """Return how many times lm_head is invoked while `run(model)` executes+backprops."""
+    calls = {"n": 0}
+    handle = model.get_output_embeddings().register_forward_pre_hook(lambda *_: calls.__setitem__("n", calls["n"] + 1))
+    try:
+        run(model)
+    finally:
+        handle.remove()
+    return calls["n"]
+
+
+def test_grad_path_recomputes_logits_no_grad_does_not():
+    """The bound only holds if the grad path recomputes each block's logits in backward.
+
+    Under gradient, checkpointing runs lm_head twice per block (forward + backward
+    recompute) so the (block, vocab) logits are freed after forward instead of kept
+    alive until .backward() -- that recompute is exactly what keeps the peak at
+    chunk_size*vocab instead of L*vocab. The no-grad passes must not pay it.
+    """
+    model, input_ids, attention_mask = _fixture()
+    b0 = input_ids[:1]  # one sample
+    m0 = attention_mask[:1]
+    # per_token_logprobs projects L-1 positions (it drops the last), chunk_size at a time.
+    n_blocks = -(-(b0.shape[1] - 1) // 2)  # ceil((L-1) / 2)
+
+    def _grad_run(m):
+        m.zero_grad()
+        per_token_logprobs(m, b0, m0, chunk_size=2).sum().backward()
+
+    grad_calls = _count_lm_head_calls(model, _grad_run)
+
+    def _nograd_run(m):
+        with torch.no_grad():
+            per_token_logprobs(m, b0, m0, chunk_size=2)
+
+    nograd_calls = _count_lm_head_calls(model, _nograd_run)
+
+    assert nograd_calls == n_blocks  # one projection per block, no recompute
+    assert grad_calls == 2 * n_blocks  # forward + backward recompute per block
