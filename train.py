@@ -24,7 +24,7 @@ from einops import rearrange
 from omegaconf import DictConfig, OmegaConf
 from transformers import AutoProcessor, Qwen3_5ForConditionalGeneration
 
-from lora import adapter_state_dict, adapters_disabled, apply_lora
+from lora import DEFAULT_TARGET_MODULES, adapter_state_dict, adapters_disabled, apply_lora
 from rsenv import (
     BridgeClient,
     BridgeClientPool,
@@ -43,24 +43,13 @@ logging.basicConfig(level=logging.INFO, format="%(name)s: %(message)s")
 @dataclass(frozen=True)
 class ModelConfig:
     model_name_or_path: str = "Qwen/Qwen3-4B-Base"
-    quantize_int4: bool = True
-    quantize_fp8: bool = False  # FP8 weight-only on the frozen base (Ada sm_89+, e.g. RTX 4090)
     max_new_tokens: int = 512
     temperature: float = 0.8
-    # LoRA: train low-rank adapters on a frozen base instead of full fine-tuning.
-    use_lora: bool = False
+    # This branch always trains LoRA adapters on a frozen base; on CUDA the base is FP8-quantized.
     lora_r: int = 16
     lora_alpha: int = 32
     lora_dropout: float = 0.0
-    lora_target_modules: tuple[str, ...] = (
-        "q_proj",
-        "k_proj",
-        "v_proj",
-        "o_proj",
-        "gate_proj",
-        "up_proj",
-        "down_proj",
-    )
+    lora_target_modules: tuple[str, ...] = DEFAULT_TARGET_MODULES
 
 
 @dataclass(frozen=True)
@@ -118,7 +107,7 @@ def build_config(cfg: DictConfig) -> Config:
 
 
 def load_model(config: ModelConfig, device: torch.device) -> tuple[Qwen3_5ForConditionalGeneration, AutoProcessor]:
-    """Load Qwen3.5 multimodal model + processor. Apply torchao int4 quantization if configured."""
+    """Load Qwen3.5 + processor, wrap in LoRA adapters, and FP8-quantize the frozen base on CUDA."""
     processor = AutoProcessor.from_pretrained(config.model_name_or_path)
     if processor.tokenizer.pad_token is None:
         processor.tokenizer.pad_token = processor.tokenizer.eos_token
@@ -129,69 +118,29 @@ def load_model(config: ModelConfig, device: torch.device) -> tuple[Qwen3_5ForCon
         device_map={"": device} if device.type == "cuda" else None,
     )
 
-    if config.use_lora:
-        # Wrap BEFORE quantizing so adapters are created from the bf16 base (bf16 A/B params) and
-        # FP8 quantization then only touches the frozen base linears.
-        num_wrapped = apply_lora(
-            model,
-            r=config.lora_r,
-            alpha=config.lora_alpha,
-            dropout=config.lora_dropout,
-            target_modules=tuple(config.lora_target_modules),
-        )
-        print(f"LoRA: wrapped {num_wrapped} linear layers (r={config.lora_r}, alpha={config.lora_alpha})")
+    # Wrap in LoRA before quantizing so adapters are created from the bf16 base (bf16 A/B params)
+    # and the FP8 pass then only touches the frozen base linears.
+    num_wrapped = apply_lora(
+        model,
+        r=config.lora_r,
+        alpha=config.lora_alpha,
+        dropout=config.lora_dropout,
+        target_modules=tuple(config.lora_target_modules),
+    )
+    print(f"LoRA: wrapped {num_wrapped} linear layers (r={config.lora_r}, alpha={config.lora_alpha})")
 
-    if device.type != "cuda":
-        model = model.to(device)
-
-    if config.quantize_int4:
-        if config.use_lora:
-            # int4 here is Int4WeightOnlyQATQuantizer — quantization-aware *training* of all weights,
-            # which contradicts a frozen-base LoRA. Use quantize_fp8 (weight-only PTQ) instead.
-            raise ValueError("quantize_int4 (QAT) is incompatible with use_lora; use quantize_fp8 for a frozen base")
-        from torchao.quantization.qat import Int4WeightOnlyQATQuantizer
-
-        qat = Int4WeightOnlyQATQuantizer(groupsize=128)
-        model = qat.prepare(model)
-
-    if config.quantize_fp8:
-        if device.type != "cuda":
-            raise ValueError("quantize_fp8 requires a CUDA device (Ada sm_89+ FP8 tensor cores)")
-        # Weight-only PTQ on the frozen base: ~half the bf16 footprint, bf16 activations/gradients so
-        # the graph reaches the (unquantized) adapters cleanly. A/B are Parameters, untouched by this.
+    if device.type == "cuda":
+        # FP8 weight-only PTQ on the frozen base (Ada sm_89+): ~half the bf16 footprint, with bf16
+        # activations/gradients so the graph reaches the (unquantized) adapters cleanly. A/B are
+        # Parameters, untouched by this. On CPU (smoke test) FP8 is unavailable, so the base stays bf16.
         from torchao.quantization import Float8WeightOnlyConfig, quantize_
 
         quantize_(model, Float8WeightOnlyConfig())
+    else:
+        model = model.to(device)
 
     model.gradient_checkpointing_enable()
     return model, processor
-
-
-def load_ref_model(config: ModelConfig) -> Qwen3_5ForConditionalGeneration:
-    """Load a frozen reference model on CPU. Swapped to GPU briefly each step for fast logprob computation."""
-    ref_model = Qwen3_5ForConditionalGeneration.from_pretrained(
-        config.model_name_or_path,
-        torch_dtype=torch.bfloat16,
-    )
-    ref_model.eval()
-    for p in ref_model.parameters():
-        p.requires_grad = False
-    return ref_model
-
-
-def compute_ref_logprobs(
-    ref_model: Qwen3_5ForConditionalGeneration,
-    input_ids: torch.Tensor,
-    attention_mask: torch.Tensor,
-    device: torch.device,
-) -> torch.Tensor:
-    """Swap ref model to GPU, compute logprobs, swap back. Returns cached tensor on device."""
-    ref_model.to(device)
-    with torch.no_grad():
-        ref_lp = get_per_token_logprobs(ref_model, input_ids, attention_mask)
-    ref_model.to("cpu")
-    torch.cuda.empty_cache()
-    return ref_lp  # stays on device
 
 
 RefLogProbFn = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
@@ -199,36 +148,23 @@ RefLogProbFn = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 
 def make_ref_logprob_fn(
     model: Qwen3_5ForConditionalGeneration,
-    ref_model: Qwen3_5ForConditionalGeneration | None,
-    use_lora: bool,
     kl_coeff: float,
-    device: torch.device,
 ) -> RefLogProbFn | None:
-    """Build the KL reference log-prob function.
+    """Build the KL reference log-prob function, or None when KL is disabled.
 
-    With LoRA the base policy is the reference: disable the adapters and run the same model, so no
-    separate frozen copy (and no CPU↔GPU swap) is needed. Without LoRA, fall back to the frozen
-    `ref_model`.
+    The frozen base policy is the reference: disable the LoRA adapters and run the same model, so no
+    separate reference copy (and no CPU↔GPU swap) is needed.
     """
     if kl_coeff <= 0:
         return None
 
-    if use_lora:
+    def ref_via_base(input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+        # eval() so base dropout doesn't perturb the reference; the loop re-sets train/eval after.
+        model.eval()
+        with torch.no_grad(), adapters_disabled(model):
+            return get_per_token_logprobs(model, input_ids, attention_mask)
 
-        def ref_via_base(input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
-            # eval() so base dropout doesn't perturb the reference; the loop re-sets train/eval after.
-            model.eval()
-            with torch.no_grad(), adapters_disabled(model):
-                return get_per_token_logprobs(model, input_ids, attention_mask)
-
-        return ref_via_base
-
-    assert ref_model is not None, "kl_coeff>0 without LoRA requires a reference model"
-
-    def ref_via_frozen(input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
-        return compute_ref_logprobs(ref_model, input_ids, attention_mask, device)
-
-    return ref_via_frozen
+    return ref_via_base
 
 
 # ─── Log-prob computation ──────────────────────────────────────────────────
@@ -430,28 +366,17 @@ def train(config: Config) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     torch.manual_seed(config.grpo.seed)
 
-    print(f"Loading model: {config.model.model_name_or_path} (int4={config.model.quantize_int4})")
+    print(f"Loading model: {config.model.model_name_or_path} (LoRA r={config.model.lora_r}, FP8 base on CUDA)")
     model, processor = load_model(config.model, device)
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Trainable parameters: {trainable_params:,}")
 
     if config.grpo.kl_coeff <= 0:
-        print("KL disabled (kl_coeff=0), skipping reference model")
-        ref_model = None
-    elif config.model.use_lora:
-        print("KL reference = frozen base (adapters disabled); no separate reference model")
-        ref_model = None
+        print("KL disabled (kl_coeff=0), skipping reference")
     else:
-        print("Loading reference model on CPU...")
-        ref_model = load_ref_model(config.model)
+        print("KL reference = frozen base (adapters disabled); no separate reference model")
 
-    compute_ref = make_ref_logprob_fn(
-        model=model,
-        ref_model=ref_model,
-        use_lora=config.model.use_lora,
-        kl_coeff=config.grpo.kl_coeff,
-        device=device,
-    )
+    compute_ref = make_ref_logprob_fn(model=model, kl_coeff=config.grpo.kl_coeff)
 
     optimizer = torch.optim.AdamW(
         [p for p in model.parameters() if p.requires_grad],
@@ -659,8 +584,7 @@ def train(config: Config) -> None:
             ckpt_path = os.path.join(model_dir, f"checkpoint_{step}.pt")
             torch.save(
                 {
-                    "model": adapter_state_dict(model) if config.model.use_lora else model.state_dict(),
-                    "is_lora": config.model.use_lora,
+                    "model": adapter_state_dict(model),
                     "optimizer": optimizer.state_dict(),
                     "scheduler": scheduler.state_dict(),
                     "step": step,
@@ -673,8 +597,7 @@ def train(config: Config) -> None:
     final_path = os.path.join(model_dir, "checkpoint_final.pt")
     torch.save(
         {
-            "model": adapter_state_dict(model) if config.model.use_lora else model.state_dict(),
-            "is_lora": config.model.use_lora,
+            "model": adapter_state_dict(model),
             "optimizer": optimizer.state_dict(),
             "scheduler": scheduler.state_dict(),
             "step": step,

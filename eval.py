@@ -47,25 +47,20 @@ def load_checkpoint(
     if device.type != "cuda":
         model = model.to(device)
 
+    model_config = model_config or {}
+    apply_lora(
+        model,
+        r=model_config.get("lora_r", 16),
+        alpha=model_config.get("lora_alpha", 32),
+        dropout=0.0,  # inference: no adapter dropout
+        target_modules=tuple(model_config.get("lora_target_modules") or DEFAULT_TARGET_MODULES),
+    )
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=True)
-    is_lora = ckpt.get("is_lora", False)
-    if is_lora:
-        if model_config is None:
-            raise ValueError("LoRA checkpoint requires config.json (LoRA hyperparameters) to rebuild adapters")
-        apply_lora(
-            model,
-            r=model_config.get("lora_r", 16),
-            alpha=model_config.get("lora_alpha", 32),
-            dropout=0.0,  # inference: no adapter dropout
-            target_modules=tuple(model_config.get("lora_target_modules") or DEFAULT_TARGET_MODULES),
-        )
-        missing, unexpected = model.load_state_dict(ckpt["model"], strict=False)
-        if unexpected:
-            raise ValueError(f"Unexpected keys in LoRA checkpoint: {unexpected[:5]}")
-    else:
-        model.load_state_dict(ckpt["model"])
+    _, unexpected = model.load_state_dict(ckpt["model"], strict=False)
+    if unexpected:
+        raise ValueError(f"Unexpected keys in LoRA checkpoint: {unexpected[:5]}")
     step = ckpt.get("step", "?")
-    print(f"Loaded {'LoRA ' if is_lora else ''}checkpoint from step {step}: {checkpoint_path}")
+    print(f"Loaded LoRA checkpoint from step {step}: {checkpoint_path}")
 
     return model, tokenizer
 
